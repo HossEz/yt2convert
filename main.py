@@ -32,7 +32,7 @@ from mutagen.mp3 import MP3
 APP_NAME = "yt2convert"
 APP_VERSION = "1.0.0"
 GITHUB_REPO = "HossEz/yt2convert" 
-GITHUB_API_URL = f"http://localhost:5000/repos/yourusername/yt2convert/releases/latest"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
@@ -825,10 +825,11 @@ class ModernMainWindow(QWidget):
     # ---------- Update Checking ----------
     def _check_for_updates_silent(self):
         """Check for updates without showing messages if no update is available"""
-        self.update_checker = UpdateChecker(silent_check=True)
-        self.update_checker.update_available.connect(self._on_update_available)
-        self.update_checker.check_failed.connect(lambda e: None)  # Silent fail
-        self.update_checker.start()
+        self.silent_checker = UpdateChecker(silent_check=True)
+        self.silent_checker.update_available.connect(self._on_update_available)
+        self.silent_checker.check_failed.connect(lambda e: None) 
+        self.silent_checker.finished.connect(lambda: setattr(self, 'silent_checker', None))
+        self.silent_checker.start()
 
     def _check_for_updates_manual(self):
         """Manual update check triggered by user"""
@@ -892,7 +893,7 @@ class ModernMainWindow(QWidget):
         update_layout.addWidget(auto_update_check)
         
         # Check for updates button
-        check_update_btn = QPushButton("Check for Updates Now")
+        check_update_btn = QPushButton("Check for Updates")
         update_layout.addWidget(check_update_btn)
         
         layout.addRow("Updates:", update_frame)
@@ -909,15 +910,17 @@ class ModernMainWindow(QWidget):
             check_update_btn.setText("Checking...")
             QApplication.processEvents()
             
-            checker = UpdateChecker(silent_check=False)
-            checker.update_available.connect(lambda info: dlg.reject() or self._on_update_available(info))
-            checker.no_update.connect(lambda: (check_update_btn.setText("Check for Updates Now"), 
-                                             dlg.setEnabled(True),
-                                             self._on_no_update()))
-            checker.check_failed.connect(lambda e: (check_update_btn.setText("Check for Updates Now"), 
-                                                  dlg.setEnabled(True),
-                                                  self._on_update_check_failed(e)))
-            checker.start()
+            # Store the checker as an attribute of the dialog to prevent premature destruction
+            dlg.checker = UpdateChecker(silent_check=False)
+            dlg.checker.update_available.connect(lambda info: dlg.reject() or self._on_update_available(info))
+            dlg.checker.no_update.connect(lambda: (check_update_btn.setText("Check for Updates Now"), 
+                                                dlg.setEnabled(True),
+                                                self._on_no_update()))
+            dlg.checker.check_failed.connect(lambda e: (check_update_btn.setText("Check for Updates Now"), 
+                                                    dlg.setEnabled(True),
+                                                    self._on_update_check_failed(e)))
+            dlg.checker.finished.connect(lambda: setattr(dlg, 'checker', None))  # Clean up reference when done
+            dlg.checker.start()
 
         check_update_btn.clicked.connect(check_updates)
 
@@ -943,6 +946,10 @@ class ModernMainWindow(QWidget):
             dlg.accept()
 
         def do_cancel():
+            # Clean up any running thread
+            if hasattr(dlg, 'checker') and dlg.checker and dlg.checker.isRunning():
+                dlg.checker.quit()
+                dlg.checker.wait(1000)  # Wait up to 1 second for thread to finish
             dlg.reject()
 
         save_btn.clicked.connect(do_save)
