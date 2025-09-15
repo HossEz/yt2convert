@@ -30,7 +30,7 @@ echo Installing/updating required packages...
 python -m pip install --upgrade pip
 
 REM Install packages with SSL bypass
-pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org yt-dlp PySide6 mutagen requests
+pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org yt-dlp PySide6 mutagen requests packaging
 
 REM Update yt-dlp to latest version (helps with SSL issues)
 echo Updating yt-dlp to latest version...
