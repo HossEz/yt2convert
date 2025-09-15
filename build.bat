@@ -44,6 +44,17 @@ if exist "ffmpeg.exe" (
     set INCLUDE_FFMPEG=0
 )
 echo.
+REM Check for icon file presence
+if exist "appicon.ico" (
+    echo ✅ Custom icon file appicon.ico found.
+    set CUSTOM_ICON=--icon "appicon.ico"
+    set ADD_ICON=--add-data "appicon.ico;."
+) else (
+    echo ⚠️  No custom icon file 'appicon.ico' found. Default icon will be used.
+    set CUSTOM_ICON=
+    set ADD_ICON=
+)
+echo.
 echo Building standalone executable...
 echo This will take a few minutes...
 echo.
@@ -55,11 +66,13 @@ if %INCLUDE_FFMPEG%==1 (
     set ADD_FFMPEG=
 )
 
-REM Use python -m PyInstaller to force using the venv’s PyInstaller
+REM Use python -m PyInstaller to force using the venv's PyInstaller
 python -m PyInstaller ^
     --onefile ^
     --windowed ^
     --name "yt2convert" ^
+    %CUSTOM_ICON% ^
+    %ADD_ICON% ^
     --distpath "./dist" ^
     --workpath "./build" ^
     --specpath "." ^
