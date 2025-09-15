@@ -24,10 +24,13 @@ from PySide6.QtWidgets import (
     QFormLayout, QFrame, QMenu, QTextEdit, QDialog, QCheckBox, QSizePolicy
 )
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QIcon
 
 from mutagen.easyid3 import EasyID3
 from mutagen.mp3 import MP3
+
+# Remove the QPixmap import since we're not using it directly
+# from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 
 APP_NAME = "yt2convert"
 APP_VERSION = "1.0.0"
@@ -111,6 +114,29 @@ def save_history(history: List[Dict]):
             json.dump(history, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print("Warning: could not save history:", e)
+
+# ---------- Icon Handling Function ----------
+def get_icon_path():
+    """Get the path to the app icon, handling both development and built environments"""
+    # If we're running as a PyInstaller bundle
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    # Check for icon in several possible locations
+    icon_paths = [
+        os.path.join(base_path, "appicon.ico"),
+        os.path.join(base_path, "resources", "appicon.ico"),
+        os.path.join(base_path, "..", "resources", "appicon.ico"),
+    ]
+    
+    for path in icon_paths:
+        if os.path.exists(path):
+            return path
+    
+    # If no icon found, return None (will use default icon)
+    return None
 
 # ---------- Update Checker Thread ----------
 class UpdateChecker(QThread):
@@ -535,6 +561,14 @@ class ModernMainWindow(QWidget):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setMinimumSize(920, 600)
+        
+        # Set window icon - moved here to avoid QPixmap error
+        icon_path = get_icon_path()
+        if icon_path and os.path.exists(icon_path):
+            app_icon = QIcon(icon_path)
+            self.setWindowIcon(app_icon)
+            # Also set application icon for taskbar
+            QApplication.instance().setWindowIcon(app_icon)
 
         self.settings = load_settings()
         Path(self.settings.get("download_folder", DEFAULT_SETTINGS["download_folder"])).mkdir(parents=True, exist_ok=True)
