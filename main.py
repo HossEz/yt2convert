@@ -29,7 +29,7 @@ from mutagen.easyid3 import EasyID3
 from mutagen.mp3 import MP3
 
 APP_NAME = "yt2convert"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 GITHUB_REPO = "HossEz/yt2convert" 
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -134,6 +134,100 @@ def get_icon_path():
     # If no icon found, return None (will use default icon)
     return None
 
+# ---------- Helper functions for update management ----------
+def get_current_executable_path():
+    """Get the path of the currently running executable"""
+    if hasattr(sys, 'frozen'):
+        return sys.executable
+    else:
+        return os.path.abspath(sys.argv[0])
+
+def get_executable_directory():
+    """Get the directory containing the current executable"""
+    return Path(get_current_executable_path()).parent
+
+def create_update_batch_script(old_exe_path, new_exe_path, app_name):
+    """Create a batch script that will handle the update after the app closes"""
+    batch_content = f'''@echo off
+timeout /t 2 /nobreak >nul
+echo Updating {app_name}...
+
+:retry
+del /f /q "{old_exe_path}" 2>nul
+if exist "{old_exe_path}" (
+    timeout /t 1 /nobreak >nul
+    goto retry
+)
+
+move "{new_exe_path}" "{old_exe_path}"
+if errorlevel 1 (
+    echo Update failed. Press any key to exit.
+    pause >nul
+    exit /b 1
+)
+
+echo Update completed successfully!
+echo Starting {app_name}...
+start "" "{old_exe_path}"
+
+del /f /q "%~f0" 2>nul & exit /b 0
+'''
+    
+    # Create batch file in temp directory
+    batch_path = Path(tempfile.gettempdir()) / f"update_{app_name}_{os.getpid()}.bat"
+    with open(batch_path, 'w') as f:
+        f.write(batch_content)
+    
+    return batch_path
+
+def safe_replace_executable_delayed(old_path, new_path, app_name="yt2convert"):
+    """Safely replace the old executable using a delayed batch script approach"""
+    old_path = Path(old_path)
+    new_path = Path(new_path)
+    
+    try:
+        # Create the update batch script
+        batch_script = create_update_batch_script(str(old_path), str(new_path), app_name)
+        
+        # Start the batch script in a detached process
+        if sys.platform.startswith("win"):
+            # Use DETACHED_PROCESS to ensure the batch runs independently
+            subprocess.Popen(
+                [str(batch_script)], 
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_CONSOLE,
+                cwd=tempfile.gettempdir()
+            )
+        
+        return True
+    except Exception as e:
+        raise e
+
+def safe_replace_executable_move_and_restart(old_path, new_path):
+    """Alternative approach: rename old exe and place new one, then restart"""
+    old_path = Path(old_path)
+    new_path = Path(new_path)
+    backup_path = old_path.with_suffix('.old')
+    
+    try:
+        # Step 1: Rename the current executable to .old
+        if old_path.exists():
+            if backup_path.exists():
+                backup_path.unlink()  # Remove any existing .old file
+            old_path.rename(backup_path)
+        
+        # Step 2: Move new executable to the original location
+        shutil.move(str(new_path), str(old_path))
+        
+        return True
+    except Exception as e:
+        # Try to restore the original file if something went wrong
+        if backup_path.exists() and not old_path.exists():
+            try:
+                backup_path.rename(old_path)
+            except:
+                pass
+        raise e
+
 # ---------- Update Checker Thread ----------
 class UpdateChecker(QThread):
     update_available = Signal(dict)  # {version, download_url, changelog}
@@ -189,7 +283,7 @@ class UpdateChecker(QThread):
 # ---------- Update Downloader Thread ----------
 class UpdateDownloader(QThread):
     progress_changed = Signal(int)  # 0-100
-    download_finished = Signal(str)  # file_path
+    download_finished = Signal(str)  # temp_file_path
     download_failed = Signal(str)  # error message
     
     def __init__(self, download_url, parent=None):
@@ -204,7 +298,7 @@ class UpdateDownloader(QThread):
             
             total_size = int(response.headers.get('content-length', 0))
             
-            # Create temporary file
+            # Download to a temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix=".exe") as temp_file:
                 temp_path = temp_file.name
                 downloaded = 0
@@ -511,38 +605,86 @@ class UpdateDialog(QDialog):
             self.downloader.wait()
         self.reject()
     
-    def _on_download_finished(self, file_path):
+    def _on_download_finished(self, temp_path):
         self.status_label.setText("Download complete! Installing...")
         self.progress_bar.setValue(100)
         
-        # Show installation instructions
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Update Downloaded")
-        msg.setIcon(QMessageBox.Information)
-        msg.setText("Update downloaded successfully!")
-        msg.setInformativeText(
-            "The application will now close and the installer will start.\n"
-            "Please follow the installation instructions to complete the update."
-        )
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec()
-        
-        # Start the installer and close the application
         try:
-            if sys.platform.startswith("win"):
-                subprocess.Popen([file_path], creationflags=subprocess.DETACHED_PROCESS)
-            else:
-                subprocess.Popen([file_path])
+            current_exe = get_current_executable_path()
             
-            # Close the application
-            QApplication.instance().quit()
-            
+            # Try the delayed batch script method first (most reliable)
+            try:
+                safe_replace_executable_delayed(current_exe, temp_path, APP_NAME)
+                
+                # Show success message
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Update Complete")
+                msg.setIcon(QMessageBox.Information)
+                msg.setText("Update will be installed when you close the application!")
+                msg.setInformativeText(
+                    "The update has been prepared. When you close the application, "
+                    "the update will be automatically installed and the application will restart.\n\n"
+                    "Click OK to close the application now and apply the update."
+                )
+                msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+                msg.setDefaultButton(QMessageBox.Ok)
+                
+                if msg.exec() == QMessageBox.Ok:
+                    # Close the application to trigger the update
+                    QApplication.instance().quit()
+                else:
+                    # User chose to continue using the app, update will happen on next close
+                    pass
+                
+            except Exception as batch_error:
+                # Fallback to the rename method
+                try:
+                    safe_replace_executable_move_and_restart(current_exe, temp_path)
+                    
+                    # Show success message for rename method
+                    msg = QMessageBox(self)
+                    msg.setWindowTitle("Update Complete")
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setText("Update installed successfully!")
+                    msg.setInformativeText(
+                        "The application has been updated. Please restart the application to use the new version.\n"
+                        "The old version has been backed up as .old"
+                    )
+                    msg.setStandardButtons(QMessageBox.Ok)
+                    
+                    if msg.exec() == QMessageBox.Ok:
+                        # Restart the application
+                        try:
+                            subprocess.Popen([current_exe], cwd=Path(current_exe).parent)
+                            QApplication.instance().quit()
+                        except Exception as restart_error:
+                            error_msg = QMessageBox(self)
+                            error_msg.setIcon(QMessageBox.Warning)
+                            error_msg.setWindowTitle("Restart Required")
+                            error_msg.setText("Update installed successfully, but automatic restart failed.")
+                            error_msg.setInformativeText(f"Please manually restart the application.\nRestart error: {str(restart_error)}")
+                            error_msg.exec()
+                            
+                except Exception as rename_error:
+                    # Both methods failed
+                    error_msg = QMessageBox(self)
+                    error_msg.setIcon(QMessageBox.Critical)
+                    error_msg.setWindowTitle("Installation Error")
+                    error_msg.setText("Could not install update automatically.")
+                    error_msg.setInformativeText(
+                        f"Batch script error: {str(batch_error)}\n"
+                        f"Rename method error: {str(rename_error)}\n\n"
+                        f"Downloaded file is available at:\n{temp_path}\n\n"
+                        "Please manually replace the executable or run as administrator."
+                    )
+                    error_msg.exec()
+                    
         except Exception as e:
             error_msg = QMessageBox(self)
             error_msg.setIcon(QMessageBox.Critical)
             error_msg.setWindowTitle("Installation Error")
-            error_msg.setText(f"Could not start installer: {str(e)}")
-            error_msg.setInformativeText(f"Please manually run the downloaded file:\n{file_path}")
+            error_msg.setText(f"Unexpected error during update: {str(e)}")
+            error_msg.setInformativeText(f"Downloaded file is available at:\n{temp_path}")
             error_msg.exec()
     
     def _on_download_failed(self, error_message):
@@ -909,9 +1051,7 @@ class ModernMainWindow(QWidget):
         layout.addRow("Theme:", theme_combo)
 
         # Update settings
-        update_frame = QFrame()
-        update_frame.setFrameStyle(QFrame.Box)
-        update_layout = QVBoxLayout(update_frame)
+        update_layout = QVBoxLayout()
         
         # Version info
         version_label = QLabel(f"Current version: {APP_VERSION}")
@@ -926,7 +1066,7 @@ class ModernMainWindow(QWidget):
         check_update_btn = QPushButton("Check for Updates")
         update_layout.addWidget(check_update_btn)
         
-        layout.addRow("Updates:", update_frame)
+        layout.addRow("Updates:", update_layout)
 
         def browse_folder():
             d = QFileDialog.getExistingDirectory(self, "Select output folder", folder_input.text())
@@ -937,18 +1077,32 @@ class ModernMainWindow(QWidget):
 
         def check_updates():
             dlg.setEnabled(False)
+            original_text = check_update_btn.text()
             check_update_btn.setText("Checking...")
             QApplication.processEvents()
             
             # Store the checker as an attribute of the dialog to prevent premature destruction
             dlg.checker = UpdateChecker(silent_check=False)
-            dlg.checker.update_available.connect(lambda info: dlg.reject() or self._on_update_available(info))
-            dlg.checker.no_update.connect(lambda: (check_update_btn.setText("Check for Updates Now"), 
-                                                dlg.setEnabled(True),
-                                                self._on_no_update()))
-            dlg.checker.check_failed.connect(lambda e: (check_update_btn.setText("Check for Updates Now"), 
-                                                    dlg.setEnabled(True),
-                                                    self._on_update_check_failed(e)))
+            
+            def on_update_available(info):
+                dlg.reject()
+                self._on_update_available(info)
+                
+            def on_no_update():
+                check_update_btn.setText("You're up to date!")
+                dlg.setEnabled(True)
+                self._on_no_update()
+                # Revert button text after 5 seconds
+                QTimer.singleShot(5000, lambda: check_update_btn.setText(original_text))
+                
+            def on_check_failed(e):
+                check_update_btn.setText(original_text)
+                dlg.setEnabled(True)
+                self._on_update_check_failed(e)
+            
+            dlg.checker.update_available.connect(on_update_available)
+            dlg.checker.no_update.connect(on_no_update)
+            dlg.checker.check_failed.connect(on_check_failed)
             dlg.checker.finished.connect(lambda: setattr(dlg, 'checker', None))  # Clean up reference when done
             dlg.checker.start()
 
