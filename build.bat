@@ -32,17 +32,29 @@ if not exist "main.py" (
     pause
     exit /b 1
 )
+REM Check for ffmpeg.exe presence
 if exist "ffmpeg.exe" (
-    echo ✅ ffmpeg.exe found - will be bundled
+    echo ✅ ffmpeg.exe found and will be bundled in the build.
     set INCLUDE_FFMPEG=1
 ) else (
-    echo ⚠️  ffmpeg.exe not found - users will need it separately
+    echo ⚠️  WARNING: ffmpeg.exe not found in this folder.
+    echo Users running the app will need to have ffmpeg installed separately.
+    echo To avoid issues, place ffmpeg.exe in the same folder as the EXE,
+    echo or install FFmpeg system-wide and add it to the system PATH.
     set INCLUDE_FFMPEG=0
 )
 echo.
 echo Building standalone executable...
 echo This will take a few minutes...
 echo.
+
+REM Conditionally set ADD_FFMPEG argument
+if %INCLUDE_FFMPEG%==1 (
+    set ADD_FFMPEG=--add-data "ffmpeg.exe;."
+) else (
+    set ADD_FFMPEG=
+)
+
 REM Use python -m PyInstaller to force using the venv’s PyInstaller
 python -m PyInstaller ^
     --onefile ^
@@ -51,7 +63,7 @@ python -m PyInstaller ^
     --distpath "./dist" ^
     --workpath "./build" ^
     --specpath "." ^
-    --add-data "ffmpeg.exe;." ^
+    %ADD_FFMPEG% ^
     --hidden-import "yt_dlp" ^
     --hidden-import "mutagen.easyid3" ^
     --hidden-import "mutagen.mp3" ^
@@ -65,6 +77,7 @@ python -m PyInstaller ^
     --upx-dir "upx" ^
     --version-file "version_info.txt" ^
     main.py
+
 if %errorlevel% equ 0 (
     echo.
     echo ========================================
