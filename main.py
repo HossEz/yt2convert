@@ -4,7 +4,6 @@ import json
 import subprocess
 import shutil
 import tempfile
-import zipfile
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -28,9 +27,6 @@ from PySide6.QtGui import QDesktopServices, QIcon
 
 from mutagen.easyid3 import EasyID3
 from mutagen.mp3 import MP3
-
-# Remove the QPixmap import since we're not using it directly
-# from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 
 APP_NAME = "yt2convert"
 APP_VERSION = "1.0.0"
