@@ -33,4 +33,4 @@ Also, yt-dlp needs `ffmpeg` to convert the files, but `ffmpeg` is already includ
 
 ## Additional
 
-If you want to build it yourself, just run the `build.bat` file. You can also use `start.bat` to start the Python script; it will install all the required dependencies and launch the script. Make sure `ffmpeg` is either in your system PATH or in the same folder as the script. *(Note: `Ffmpeg` is already bundled with the .exe version.)*
+If you want to build it yourself, just run the `build.bat` file. You can also use `start.bat` to start the Python script; it will install all the required dependencies and launch the script. Make sure `ffmpeg` is either in your system PATH or in the same folder as the script. *(Note: `Ffmpeg` is already bundled with the `.exe` version.)*
