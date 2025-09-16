@@ -1,6 +1,6 @@
 # yt2convert - YouTube to Audio & Video Converter
 
-![yt2convert Screenshot](https://i.imgur.com/Wu1VBn9.png)
+![yt2convert Screenshot](https://i.imgur.com/Q9nGBHP.png)
 
 A modern desktop application to download and convert YouTube videos to high-quality audio files (MP3/WAV) or MP4 videos.
 
