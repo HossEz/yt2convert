@@ -73,3 +73,9 @@ For those who want to run the project directly with Python, or build their own `
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](./LICENSE.txt) file for details.
+
+---
+
+
+**_Yes, this was vibecoded 😎_**
+
