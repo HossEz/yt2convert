@@ -22,14 +22,14 @@ from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QListWidget, QListWidgetItem, QProgressBar, QMessageBox,
     QFormLayout, QFrame, QMenu, QTextEdit, QDialog, QCheckBox, QSizePolicy
 )
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
 
 from mutagen.easyid3 import EasyID3
 from mutagen.mp3 import MP3
 
 APP_NAME = "yt2convert"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "HossEz/yt2convert" 
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -59,10 +59,67 @@ AUDIO_FORMATS = {
         "64 kbps": {"bitrate": "64k", "codec": "libmp3lame"}
     },
     "WAV": {
-        "16-bit (44.1 kHz)": {"codec": "pcm_s16le", "sample_rate": "44100"},
+        "32-bit (48 kHz)": {"codec": "pcm_f32le", "sample_rate": "48000"},
         "24-bit (48 kHz)": {"codec": "pcm_s24le", "sample_rate": "48000"},
-        "32-bit (48 kHz)": {"codec": "pcm_f32le", "sample_rate": "48000"}
+        "16-bit (44.1 kHz)": {"codec": "pcm_s16le", "sample_rate": "44100"}
     }
+}
+
+# More realistic video codec to yt-dlp format mapping
+VIDEO_CODEC_FORMATS = {
+    "H.264 (AVC)": {
+        "format_selector": "avc1",
+        "common_name": "h264",
+        "audio_codec": "aac"  # H.264 uses AAC for compatibility
+    },
+    "VP9": {
+        "format_selector": "vp9", 
+        "common_name": "vp9",
+        "audio_codec": "opus"  # VP9 uses Opus for better quality
+    },
+    "AV1": {
+        "format_selector": "av01",
+        "common_name": "av1",
+        "audio_codec": "opus"  # AV1 uses Opus for better quality
+    }
+}
+
+# Realistic resolution availability by codec (based on typical YouTube availability)
+CODEC_RESOLUTION_MATRIX = {
+    "H.264 (AVC)": {
+        "1080p": {"height": 1080, "common": True},
+        "720p": {"height": 720, "common": True},
+        "480p": {"height": 480, "common": True},
+        "360p": {"height": 360, "common": True},
+        "240p": {"height": 240, "common": False},
+        "144p": {"height": 144, "common": False}
+    },
+    "VP9": {
+        "2160p (4K)": {"height": 2160, "common": True},
+        "1440p (2K)": {"height": 1440, "common": True},
+        "1080p": {"height": 1080, "common": True}, 
+        "720p": {"height": 720, "common": True},
+        "480p": {"height": 480, "common": False},
+        "360p": {"height": 360, "common": False}
+    },
+    "AV1": {
+        "2160p (4K)": {"height": 2160, "common": True},
+        "1440p (2K)": {"height": 1440, "common": False},
+        "1080p": {"height": 1080, "common": False},
+        "720p": {"height": 720, "common": False}
+    }
+}
+
+# Update RESOLUTION_CODEC_MATRIX accordingly
+RESOLUTION_CODEC_MATRIX = {
+    "2160p (4K)": ["VP9", "AV1"],
+    "1440p (2K)": ["VP9", "AV1"],
+    "1080p": ["H.264 (AVC)", "VP9"],
+    "720p": ["H.264 (AVC)", "VP9"],
+    "480p": ["H.264 (AVC)"],
+    "360p": ["H.264 (AVC)"],
+    "240p": ["H.264 (AVC)"],
+    "144p": ["H.264 (AVC)"]
 }
 
 # ---------- Settings persistence ----------
@@ -269,7 +326,7 @@ class UpdateChecker(QThread):
                     })
                 else:
                     if not self.silent_check:
-                        self.check_failed.emit("No compatible download found")
+                        self.check_failed.emit("No compatible download found")  # Fixed indentation here
             else:
                 self.no_update.emit()
                 
@@ -330,11 +387,12 @@ class DownloadWorker(QThread):
     finished_success = Signal(dict)    # info about file
     log_line = Signal(str)
 
-    def __init__(self, url: str, format_choice: str, quality_choice: str, outdir: str, parent=None):
+    def __init__(self, url: str, format_choice: str, quality_choice: str, outdir: str, codec_choice: str = None, parent=None):
         super().__init__(parent)
         self.url = url
         self.format_choice = format_choice
         self.quality_choice = quality_choice
+        self.codec_choice = codec_choice
         self.outdir = str(Path(outdir).expanduser())
         self._stop_requested = False
 
@@ -357,8 +415,9 @@ class DownloadWorker(QThread):
         Path(self.outdir).mkdir(parents=True, exist_ok=True)
 
         tmp_template = os.path.join(self.outdir, "%(title).200s.%(ext)s")
+        
+        # Common yt-dlp options
         ytdlp_opts = {
-            "format": "bestaudio/best",
             "outtmpl": tmp_template,
             "restrictfilenames": False,
             "no_warnings": True,
@@ -371,6 +430,60 @@ class DownloadWorker(QThread):
             "extract_flat": False,
             "cookiefile": None,
         }
+
+        # Add format-specific options
+        if self.format_choice in ["MP3", "WAV"]:
+            # Audio download
+            ytdlp_opts["format"] = "bestaudio/best"
+            ytdlp_opts["postprocessors"] = []
+        else:
+            # Video download - use the improved format selector
+            resolution = self.quality_choice
+            codec = self.codec_choice or "Best Available"
+            
+            if resolution == "Best Available" and codec == "Best Available":
+                ytdlp_opts["format"] = "bestvideo+bestaudio/best"
+            else:
+                format_parts = []
+                
+                # Add resolution constraint
+                if resolution != "Best Available" and resolution in RESOLUTION_CODEC_MATRIX:
+                    # Find the height from our codec matrix first
+                    height = None
+                    for codec_name, resolutions in CODEC_RESOLUTION_MATRIX.items():
+                        if resolution in resolutions:
+                            height = resolutions[resolution]["height"]
+                            break
+                    
+                    # Fallback - extract height from resolution string
+                    if height is None:
+                        import re
+                        height_match = re.search(r'(\d+)p', resolution)
+                        height = int(height_match.group(1)) if height_match else 720
+                    
+                    format_parts.append(f"height<={height}")
+                
+                # Add codec constraint  
+                if codec != "Best Available" and codec in VIDEO_CODEC_FORMATS:
+                    codec_selector = VIDEO_CODEC_FORMATS[codec]["format_selector"]
+                    format_parts.append(f"vcodec^={codec_selector}")
+                
+                # Build the format string with fallback
+                if format_parts:
+                    constraints = "[" + "][".join(format_parts) + "]"
+                    
+                    # For H.264, prioritize formats with AAC audio but allow fallback to any audio
+                    if codec == "H.264 (AVC)":
+                        format_string = f"bestvideo{constraints}+bestaudio[acodec^=mp4a]/best{constraints}/bestvideo+bestaudio/best"
+                    else:
+                        # For other codecs, use the best available audio
+                        format_string = f"bestvideo{constraints}+bestaudio/best{constraints}/bestvideo+bestaudio/best"
+                else:
+                    format_string = "bestvideo+bestaudio/best"
+                
+                ytdlp_opts["format"] = format_string
+            
+            ytdlp_opts["merge_output_format"] = "mp4"
 
         self.log_line.emit("Starting yt-dlp download...")
         self.status_message.emit("info", "Starting download...")
@@ -395,85 +508,104 @@ class DownloadWorker(QThread):
 
         base_title = info.get("title", f"yt_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         safe_basename = "".join(c for c in base_title if c.isalnum() or c in " .-_()").strip()
-        out_ext = self.format_choice.lower()
+        
+        # Set output extension based on format
+        if self.format_choice in ["MP3", "WAV"]:
+            out_ext = self.format_choice.lower()
+        else:
+            out_ext = "mp4"  # For video formats
+            
         out_name = f"{safe_basename}.{out_ext}"
         out_path = os.path.join(self.outdir, out_name)
 
         self.log_line.emit(f"Downloaded to: {downloaded_path}")
-        self.status_message.emit("info", "Converting audio...")
-
-        # Get format settings
-        format_settings = AUDIO_FORMATS[self.format_choice.upper()][self.quality_choice]
         
-        if out_ext == "mp3":
-            ff_args = [
-                ffmpeg_path, "-y", "-i", downloaded_path,
-                "-vn", "-map", "0:a",
-                "-c:a", format_settings["codec"], 
-                "-b:a", format_settings["bitrate"],
-                out_path
-            ]
-        else:  # wav
-            ff_args = [
-                ffmpeg_path, "-y", "-i", downloaded_path,
-                "-vn", "-map", "0:a",
-                "-c:a", format_settings["codec"],
-                "-ar", format_settings["sample_rate"],
-                out_path
-            ]
+        # Handle audio conversion
+        if self.format_choice in ["MP3", "WAV"]:
+            self.status_message.emit("info", "Converting audio...")
+            
+            # Get format settings
+            format_settings = AUDIO_FORMATS[self.format_choice.upper()][self.quality_choice]
+            
+            if out_ext == "mp3":
+                ff_args = [
+                    ffmpeg_path, "-y", "-i", downloaded_path,
+                    "-vn", "-map", "0:a",
+                    "-c:a", format_settings["codec"], 
+                    "-b:a", format_settings["bitrate"],
+                    out_path
+                ]
+            else:  # wav
+                ff_args = [
+                    ffmpeg_path, "-y", "-i", downloaded_path,
+                    "-vn", "-map", "0:a",
+                    "-c:a", format_settings["codec"],
+                    "-ar", format_settings["sample_rate"],
+                    out_path
+                ]
 
-        try:
-            proc = subprocess.Popen(
-            ff_args,
-            stderr=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW
-        )
-            while True:
-                if self._stop_requested:
-                    proc.terminate()
-                    self.status_message.emit("error", "Operation cancelled by user.")
-                    return
-                line = proc.stderr.readline()
-                if line == "" and proc.poll() is not None:
-                    break
-                if line:
-                    self.log_line.emit(line.strip())
-            ret = proc.wait()
-            if ret != 0:
-                self.status_message.emit("error", f"ffmpeg failed with exit code {ret}.")
-                return
-        except Exception as e:
-            self.status_message.emit("error", f"Conversion error: {e}")
-            return
-
-        if out_ext == "mp3":
             try:
-                audio = MP3(out_path, ID3=EasyID3)
-                tags = {}
-                if info.get("title"):
-                    tags["title"] = info.get("title")
-                if info.get("uploader"):
-                    tags["artist"] = info.get("uploader")
-                if info.get("upload_date"):
-                    tags["date"] = info.get("upload_date")[:4]
-                audio.update(tags)
-                audio.save()
+                proc = subprocess.Popen(
+                ff_args,
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+                while True:
+                    if self._stop_requested:
+                        proc.terminate()
+                        self.status_message.emit("error", "Operation cancelled by user.")
+                        return
+                    line = proc.stderr.readline()
+                    if line == "" and proc.poll() is not None:
+                        break
+                    if line:
+                        self.log_line.emit(line.strip())
+                ret = proc.wait()
+                if ret != 0:
+                    self.status_message.emit("error", f"ffmpeg failed with exit code {ret}.")
+                    return
             except Exception as e:
-                self.log_line.emit(f"Tagging warning: {e}")
+                self.status_message.emit("error", f"Conversion error: {e}")
+                return
 
-        try:
-            dp = Path(downloaded_path)
-            op = Path(out_path)
-            if dp.exists() and dp.resolve() != op.resolve():
+            if out_ext == "mp3":
                 try:
-                    dp.unlink()
-                    self.log_line.emit(f"Removed intermediate file: {dp.name}")
+                    audio = MP3(out_path, ID3=EasyID3)
+                    tags = {}
+                    if info.get("title"):
+                        tags["title"] = info.get("title")
+                    if info.get("uploader"):
+                        tags["artist"] = info.get("uploader")
+                    if info.get("upload_date"):
+                        tags["date"] = info.get("upload_date")[:4]
+                    audio.update(tags)
+                    audio.save()
                 except Exception as e:
-                    self.log_line.emit(f"Could not remove intermediate file {dp.name}: {e}")
-        except Exception:
-            pass
+                    self.log_line.emit(f"Tagging warning: {e}")
+
+            # Clean up intermediate file for audio conversions
+            try:
+                dp = Path(downloaded_path)
+                op = Path(out_path)
+                if dp.exists() and dp.resolve() != op.resolve():
+                    try:
+                        dp.unlink()
+                        self.log_line.emit(f"Removed intermediate file: {dp.name}")
+                    except Exception as e:
+                        self.log_line.emit(f"Could not remove intermediate file {dp.name}: {e}")
+            except Exception:
+                pass
+        else:
+            # For video downloads, just rename if needed
+            if downloaded_path != out_path:
+                try:
+                    shutil.move(downloaded_path, out_path)
+                    self.log_line.emit(f"Renamed video file to: {out_path}")
+                except Exception as e:
+                    self.log_line.emit(f"Could not rename video file: {e}")
+                    out_path = downloaded_path  # Use the original path
 
         self.progress_changed.emit(100.0)
         self.status_message.emit("success", f"Saved: {out_path}")
@@ -482,6 +614,7 @@ class DownloadWorker(QThread):
             "title": base_title,
             "format": out_ext,
             "quality": self.quality_choice,
+            "codec": self.codec_choice if self.format_choice == "MP4" else "",
             "downloaded_path": downloaded_path
         })
 
@@ -497,7 +630,7 @@ class DownloadWorker(QThread):
             self.log_line.emit(f"Downloading: {d.get('_percent_str','')} {d.get('_eta_str','')}")
         elif d.get("status") == "finished":
             self.progress_changed.emit(85.0)
-            self.log_line.emit("Download finished, ready to convert.")
+            self.log_line.emit("Download finished, ready to convert." if self.format_choice in ["MP3", "WAV"] else "Download finished.")
 
     def request_stop(self):
         self._stop_requested = True
@@ -723,6 +856,40 @@ class ModernMainWindow(QWidget):
         if self.settings.get("auto_check_updates", True):
             QTimer.singleShot(2000, self._check_for_updates_silent)  # Check after 2 seconds
 
+    # ---------- Download control ----------
+    def start_download(self):
+        url = self.url_input.text().strip()
+        if not url:
+            self._set_status("error", "Please enter a YouTube URL.")
+            return
+        
+        format_choice = self.format_dropdown.currentText()
+        quality_choice = self.quality_dropdown.currentText()
+        
+        if not format_choice or not quality_choice:
+            self._set_status("error", "Please select format and quality.")
+            return
+
+        # For MP4, get the codec choice
+        codec_choice = None
+        if format_choice == "MP4":
+            codec_choice = self.codec_dropdown.currentText()
+
+        outdir = self.settings.get("download_folder", DEFAULT_SETTINGS["download_folder"])
+
+        self.start_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self._set_status("info", "Queued...")
+
+        self.worker = DownloadWorker(url, format_choice, quality_choice, outdir, codec_choice)
+        self.worker.progress_changed.connect(self.progress_bar.setValue)
+        self.worker.status_message.connect(self._set_status)
+        self.worker.log_line.connect(self._append_log)
+        self.worker.finished_success.connect(self._on_download_finish)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.start()
+
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -741,7 +908,7 @@ class ModernMainWindow(QWidget):
         title = QLabel(APP_NAME)
         title.setObjectName("app_title")
         title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        subtitle = QLabel("🎶 Audio download & convert — yt-dlp + ffmpeg")
+        subtitle = QLabel("🎶 Audio/Video download & convert — yt-dlp + ffmpeg")
         subtitle.setObjectName("subtitle")
         header.addWidget(title)
         header.addWidget(subtitle, 0, Qt.AlignRight)
@@ -753,29 +920,64 @@ class ModernMainWindow(QWidget):
 
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("Paste YouTube URL or share link...")
-        self.url_input.returnPressed.connect(self.start_download)
+        # Moved the connection to after the method is defined
 
         self.format_dropdown = QComboBox()
-        self.format_dropdown.addItems(["MP3", "WAV"])
+        self.format_dropdown.addItems(["MP3", "WAV", "MP4"])
         self.format_dropdown.setFixedWidth(100)
-        self.format_dropdown.currentTextChanged.connect(self._update_quality_options)
+        self.format_dropdown.currentTextChanged.connect(self._update_format_options)
 
         self.quality_dropdown = QComboBox()
-        self.quality_dropdown.setFixedWidth(200)
+        self.quality_dropdown.setFixedWidth(130)
+
+        self.codec_dropdown = QComboBox()
+        self.codec_dropdown.setFixedWidth(130)
+        self.codec_dropdown.addItems(["Auto (Best Available)"] + list(VIDEO_CODEC_FORMATS.keys()))
+        self.codec_dropdown.setVisible(False)  # Hidden by default
+
+        # Add info icon (only visible when MP4 is selected)
+        self.info_icon = QLabel()
+        self.info_icon.setFixedSize(16, 16)
+        self.info_icon.setVisible(False)
+        self.info_icon.setToolTip("")  # Will be set dynamically
+        self.info_icon.setCursor(Qt.PointingHandCursor)
+        
+        # Set a stylish info icon using unicode character
+        self.info_icon.setText("ⓘ")
+        self.info_icon.setStyleSheet("""
+            QLabel {
+                color: #2bd3bf;
+                font-weight: bold;
+                font-size: 14px;
+                background: transparent;
+                border: none;
+            }
+            QLabel:hover {
+                color: #0da78b;
+            }
+        """)
+        
+        # Create a custom tooltip with styling
+        self.info_icon.mousePressEvent = self._show_codec_info
 
         self.start_button = QPushButton("Download")
         self.start_button.setFixedWidth(140)
-        self.start_button.clicked.connect(self.start_download)
+        # Moved the connection to after the method is defined
 
         controls.addWidget(self.url_input, 1)
         controls.addWidget(self.format_dropdown)
         controls.addWidget(self.quality_dropdown)
+        controls.addWidget(self.codec_dropdown)
+        controls.addWidget(self.info_icon)  # Add the info icon
         controls.addWidget(self.start_button)
 
         card_layout.addLayout(controls)
 
         # Initialize quality options
-        self._update_quality_options()
+        self._update_format_options()
+
+        self.codec_dropdown.currentTextChanged.connect(self._on_codec_changed)
+        self.quality_dropdown.currentTextChanged.connect(self._on_quality_changed)
 
         # Progress area
         prog_row = QHBoxLayout()
@@ -847,17 +1049,172 @@ class ModernMainWindow(QWidget):
 
         root.addWidget(card)
         self.setLayout(root)
+        
+        # Connect signals after all UI elements are created and methods are defined
+        self.url_input.returnPressed.connect(self.start_download)
+        self.start_button.clicked.connect(self.start_download)
 
-    def _update_quality_options(self):
-        """Update quality dropdown based on selected format"""
+    def _show_codec_info(self, event):
+        """Show a custom dialog with codec information"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
+        
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Codec Information")
+        dlg.setMinimumWidth(400)
+        dlg.setWindowModality(Qt.NonModal)
+        
+        layout = QVBoxLayout(dlg)
+        
+        # Style the dialog with rounded corners
+        dlg.setStyleSheet("""
+            QDialog {
+                background: rgba(25, 35, 45, 0.95);
+                border-radius: 12px;
+                color: #e6eef8;
+            }
+            QLabel {
+                background: transparent;
+                padding: 8px;
+                font-size: 13px;
+            }
+        """)
+        
+        # Updated info text with correct audio codec information
+        info_text = """
+        <h3>Video Codec Information</h3>
+        <p><b>H.264 (AVC):</b> Best compatibility, average quality. Max quality is 1080p. Prioritizes AAC audio for compatibility.</p>
+        <p><b>VP9:</b> Better quality than H.264, supports 4K & HDR. Uses Opus audio.</p>
+        <p><b>AV1:</b> Best quality and efficiency. Supports 8K & HDR. Uses Opus audio.</p>
+        <p><i>Note: For H.264, if no high-quality AAC stream is available, it may fall back to other audio codecs to maintain video quality.</i></p>
+        """
+        
+        label = QLabel(info_text)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.RichText)
+        layout.addWidget(label)
+        
+        # Position the dialog near the info icon
+        icon_pos = self.info_icon.mapToGlobal(self.info_icon.rect().topLeft())
+        dlg.move(icon_pos.x() - 350, icon_pos.y() + 20)
+        
+        dlg.exec()
+
+    def _update_format_options(self):
+        """Update quality and codec dropdowns based on selected format"""
         current_format = self.format_dropdown.currentText()
+        
+        # Store current selections to preserve them if possible
+        current_quality = self.quality_dropdown.currentText()
+        current_codec = self.codec_dropdown.currentText()
+        
         self.quality_dropdown.clear()
         
+        # Show/hide info icon based on format
+        self.info_icon.setVisible(current_format == "MP4")
+        
         if current_format in AUDIO_FORMATS:
+            # Audio format - show quality options, hide codec dropdown
             qualities = list(AUDIO_FORMATS[current_format].keys())
             self.quality_dropdown.addItems(qualities)
             # Set default to highest quality (first item)
+            if current_quality in qualities:
+                self.quality_dropdown.setCurrentText(current_quality)
+            else:
+                self.quality_dropdown.setCurrentIndex(0)
+            self.codec_dropdown.setVisible(False)
+        elif current_format == "MP4":
+            # Video format - show resolution options and codec dropdown
+            self.codec_dropdown.setVisible(True)
+            
+            # If codec is already selected, filter resolutions by codec
+            if current_codec and current_codec in list(VIDEO_CODEC_FORMATS.keys()) + ["Auto (Best Available)"]:
+                available_resolutions = self._get_available_resolutions_for_codec(current_codec)
+            else:
+                # Default: show all resolutions
+                available_resolutions = ["Best Available"] + list(RESOLUTION_CODEC_MATRIX.keys())
+            
+            self.quality_dropdown.addItems(available_resolutions)
+            
+            # Try to preserve the previous quality selection
+            if current_quality in available_resolutions:
+                self.quality_dropdown.setCurrentText(current_quality)
+            else:
+                self.quality_dropdown.setCurrentIndex(0)  # Default to "Best Available"
+
+    def _get_available_resolutions_for_codec(self, codec):
+        """Get available resolutions for a specific codec"""
+        if codec == "Auto (Best Available)":
+            # Return all resolutions, let yt-dlp decide
+            return ["Best Available"] + list(RESOLUTION_CODEC_MATRIX.keys())
+        
+        if codec in CODEC_RESOLUTION_MATRIX:
+            available = ["Best Available"]  # Always include best available option
+            resolutions = CODEC_RESOLUTION_MATRIX[codec]
+            # Add resolutions, prioritizing common ones
+            common_res = [res for res, info in resolutions.items() if info.get("common", False)]
+            uncommon_res = [res for res, info in resolutions.items() if not info.get("common", False)]
+            available.extend(common_res + uncommon_res)
+            return available
+        return ["Best Available"]
+
+    def _get_available_codecs_for_resolution(self, resolution):
+        """Get available codecs for a specific resolution"""
+        if resolution == "Best Available":
+            return ["Auto (Best Available)"] + list(VIDEO_CODEC_FORMATS.keys())
+        
+        if resolution in RESOLUTION_CODEC_MATRIX:
+            available = ["Auto (Best Available)"]  # Always include auto option
+            available.extend(RESOLUTION_CODEC_MATRIX[resolution])
+            return available
+        return ["Auto (Best Available)"]
+
+    def _on_codec_changed(self):
+        """Handle codec dropdown change - update available resolutions"""
+        if self.format_dropdown.currentText() != "MP4":
+            return
+        
+        current_codec = self.codec_dropdown.currentText()
+        current_quality = self.quality_dropdown.currentText()
+        
+        # Get available resolutions for this codec
+        available_resolutions = self._get_available_resolutions_for_codec(current_codec)
+        
+        # Update quality dropdown
+        self.quality_dropdown.blockSignals(True)  # Prevent recursive signals
+        self.quality_dropdown.clear()
+        self.quality_dropdown.addItems(available_resolutions)
+        
+        # Try to preserve selection, otherwise default to "Best Available"
+        if current_quality in available_resolutions:
+            self.quality_dropdown.setCurrentText(current_quality)
+        else:
             self.quality_dropdown.setCurrentIndex(0)
+        
+        self.quality_dropdown.blockSignals(False)
+
+    def _on_quality_changed(self):
+        """Handle quality/resolution dropdown change - update available codecs"""
+        if self.format_dropdown.currentText() != "MP4":
+            return
+        
+        current_quality = self.quality_dropdown.currentText()
+        current_codec = self.codec_dropdown.currentText()
+        
+        # Get available codecs for this resolution
+        available_codecs = self._get_available_codecs_for_resolution(current_quality)
+        
+        # Update codec dropdown
+        self.codec_dropdown.blockSignals(True)  # Prevent recursive signals
+        self.codec_dropdown.clear()
+        self.codec_dropdown.addItems(available_codecs)
+        
+        # Try to preserve selection, otherwise default to "Auto"
+        if current_codec in available_codecs:
+            self.codec_dropdown.setCurrentText(current_codec)
+        else:
+            self.codec_dropdown.setCurrentIndex(0)
+        
+        self.codec_dropdown.blockSignals(False)
 
     def _get_theme_styles(self, theme_name: str) -> str:
         """Return CSS styles for the specified theme"""
@@ -895,6 +1252,16 @@ class ModernMainWindow(QWidget):
                 QLabel { font-size:13px; }
                 QTextEdit { background: rgba(0,0,0,0.18); }
                 QListWidget { background: rgba(0,0,0,0.12); }
+                
+                /* Tooltip styling */
+                QToolTip {
+                    background-color: rgba(25, 35, 45, 0.95);
+                    color: #e6eef8;
+                    border: 1px solid rgba(255,255,255,0.1);
+                    border-radius: 6px;
+                    padding: 8px;
+                    font-size: 12px;
+                }
             """,
             "Pure Light": """
                 QWidget { background: #ffffff; color: #1a1a1a; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
@@ -1149,7 +1516,13 @@ class ModernMainWindow(QWidget):
             pretty_ts = ts.replace("T", " ") if ts else ""
             name = Path(entry.get("outfile", "")).name
             quality_info = entry.get("quality", "")
-            display = f"{name} — {entry.get('format','')} {quality_info} — {pretty_ts}"
+            codec_info = entry.get("codec", "")
+            
+            if codec_info:
+                display = f"{name} — {entry.get('format','')} {quality_info} ({codec_info}) — {pretty_ts}"
+            else:
+                display = f"{name} — {entry.get('format','')} {quality_info} — {pretty_ts}"
+                
             li = QListWidgetItem(display)
             li.setData(Qt.UserRole, entry)
             self.dl_list.addItem(li)
@@ -1179,7 +1552,8 @@ class ModernMainWindow(QWidget):
     def _open_file(self, path):
         p = Path(path)
         if p.exists():
-            QDesktopServices.openUrl(f"file://{path}")
+            url = QUrl.fromLocalFile(str(p))
+            QDesktopServices.openUrl(url)
         else:
             self._set_status("error", "File not found on disk.")
             self._append_log(f"Open failed, file missing: {path}")
@@ -1240,43 +1614,15 @@ class ModernMainWindow(QWidget):
         else:
             subprocess.run(["xdg-open", str(folder)])
 
-    # ---------- Download control ----------
-    def start_download(self):
-        url = self.url_input.text().strip()
-        if not url:
-            self._set_status("error", "Please enter a YouTube URL.")
-            return
-        
-        format_choice = self.format_dropdown.currentText()
-        quality_choice = self.quality_dropdown.currentText()
-        
-        if not format_choice or not quality_choice:
-            self._set_status("error", "Please select format and quality.")
-            return
-
-        outdir = self.settings.get("download_folder", DEFAULT_SETTINGS["download_folder"])
-
-        self.start_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-        self.progress_bar.setValue(0)
-        self._set_status("info", "Queued...")
-
-        self.worker = DownloadWorker(url, format_choice, quality_choice, outdir)
-        self.worker.progress_changed.connect(self.progress_bar.setValue)
-        self.worker.status_message.connect(self._set_status)
-        self.worker.log_line.connect(self._append_log)
-        self.worker.finished_success.connect(self._on_download_finish)
-        self.worker.finished.connect(self._on_worker_finished)
-        self.worker.start()
-
     @Slot(dict)
     def _on_download_finish(self, info: dict):
         outfile = info.get("outfile")
         title = info.get("title")
         fmt = info.get("format")
         quality = info.get("quality")
+        codec = info.get("codec", "")
         ts = datetime.now().isoformat(timespec="seconds")
-        entry = {"outfile": outfile, "title": title, "format": fmt, "quality": quality, "timestamp": ts}
+        entry = {"outfile": outfile, "title": title, "format": fmt, "quality": quality, "codec": codec, "timestamp": ts}
         self.history = [entry] + [e for e in self.history if e.get("outfile") != outfile]
         save_history(self.history)
         self._append_log(f"Saved file: {outfile}")
