@@ -58,14 +58,12 @@ echo.
 echo Building standalone executable...
 echo This will take a few minutes...
 echo.
-
 REM Conditionally set ADD_FFMPEG argument
 if %INCLUDE_FFMPEG%==1 (
     set ADD_FFMPEG=--add-data "ffmpeg.exe;."
 ) else (
     set ADD_FFMPEG=
 )
-
 REM Use python -m PyInstaller to force using the venv's PyInstaller
 python -m PyInstaller ^
     --onefile ^
@@ -90,7 +88,6 @@ python -m PyInstaller ^
     --upx-dir "upx" ^
     --version-file "version_info.txt" ^
     main.py
-
 if %errorlevel% equ 0 (
     echo.
     echo ========================================
@@ -115,35 +112,6 @@ if %errorlevel% equ 0 (
     echo   3. Windows will may show security warning initially
     echo   4. Users should click "More info" then "Run anyway"
     echo.
-    (
-        echo yt2convert - YouTube Audio Downloader
-        echo =====================================
-        echo.
-        echo A free, simple YouTube audio downloader and converter.
-        echo.
-        echo FEATURES:
-        echo - Download audio from YouTube videos
-        echo - Convert to MP3 ^(multiple bitrates^) or WAV ^(multiple qualities^)
-        echo - Modern, easy-to-use interface
-        echo - No installation required
-        echo.
-        echo HOW TO USE:
-        echo 1. Run yt2convert.exe
-        echo 2. Paste a YouTube URL
-        echo 3. Choose format and quality
-        echo 4. Click Download
-        echo.
-        echo REQUIREMENTS:
-        if !INCLUDE_FFMPEG! equ 1 (
-            echo - None! Everything is included.
-        ) else (
-            echo - FFmpeg must be installed or ffmpeg.exe in same folder
-        )
-        echo - Internet connection
-        echo.
-        echo.
-        echo Enjoy! 🎵
-    ) > "dist\README.txt"
     set /p open="Open dist folder to see the release? (y/n): "
     if /i "!open!"=="y" explorer dist
 ) else (
