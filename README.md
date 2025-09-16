@@ -23,6 +23,15 @@ Get the latest version from the [Releases page](https://github.com/HossEz/yt2con
 
 ---
 
+## System Requirements
+  
+- Windows 10/11
+- Internet connection
+- Python 3.9 or newer
+  - `.exe` version does not require a Python installation
+
+---
+
 ## How to Use
 
 1. Download & open the latest yt2convert.exe  
