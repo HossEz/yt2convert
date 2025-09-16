@@ -19,7 +19,7 @@ Get the latest version from the [Releases page](https://github.com/HossEz/yt2con
 
 ## How to Use
 
-1. Download & open the latest yt2convert.exe
+1. Download & open the latest `yt2convert.exe`
 2. Paste a YouTube URL in the input field
 3. Select your preferred format and quality
 4. Click the Download button
@@ -33,4 +33,4 @@ Also, yt-dlp needs `ffmpeg` to convert the files, but `ffmpeg` is already includ
 
 ## Additional
 
-If you want to build it yourself, just run the build.bat file. You can also use start.bat to start the Python script; it will install all the required dependencies and launch the script. Make sure ffmpeg is either in your system PATH or in the same folder as the script. *(Note: Ffmpeg is already bundled with the .exe version.)*
+If you want to build it yourself, just run the `build.bat` file. You can also use `start.bat` to start the Python script; it will install all the required dependencies and launch the script. Make sure `ffmpeg` is either in your system PATH or in the same folder as the script. *(Note: `Ffmpeg` is already bundled with the .exe version.)*
