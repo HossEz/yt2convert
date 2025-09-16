@@ -16,30 +16,18 @@ Get the latest version from the [Releases page](https://github.com/HossEz/yt2con
 ## How to Use  
 1. Download & open the latest yt2convert.exe  
 2. Paste a YouTube URL in the input field  
-3. Select your preferred format and quality 
+3. Select your preferred format and quality
 4. Click the Download button  
 5. Find your converted files in the output folder  
 
-<<<<<<< Updated upstream
-1. Download & open the latest `yt2convert.exe`
-2. Paste a YouTube URL in the input field
-3. Select your preferred format and quality
-4. Click the Download button
-5. Find your converted files in the output folder
-=======
 ## How This Works  
 This app uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) to download and extract audio or video from YouTube videos. It’s a reliable tool that handles most of the heavy lifting.  
 Also, yt-dlp needs `ffmpeg` to convert the files, but `ffmpeg` is already included with the `.exe` release, so you don’t have to install anything extra. 
->>>>>>> Stashed changes
 
 **Settings and history files** (`settings.json` and `history.json`) are saved in `%appdata%/yt2convert`.
 
-<<<<<<< Updated upstream
-If you want to build it yourself, just run the `build.bat` file. You can also use `start.bat` to start the Python script; it will install all the required dependencies and launch the script. Make sure `ffmpeg` is either in your system PATH or in the same folder as the script. *(Note: `Ffmpeg` is already bundled with the `.exe` version.)*
-=======
 ## Additional  
 If you want to build it yourself, just run the build.bat file. You can also use start.bat to start the Python script; it will install all the required dependencies and launch the script. Make sure ffmpeg is either in your system PATH or in the same folder as the script. *(Note: Ffmpeg is already bundled with the .exe version.)*
 
 ## License  
-This project is licensed under the MIT License. See the [LICENSE](./LICENSE`) file for details.
->>>>>>> Stashed changes
+This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
