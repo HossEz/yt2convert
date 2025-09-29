@@ -70,21 +70,21 @@ VIDEO_CODEC_FORMATS = {
     "H.264 (AVC)": {
         "format_selector": "avc1",
         "common_name": "h264",
-        "audio_codec": "aac"  # H.264 uses AAC for compatibility
+        "audio_codec": "aac"
     },
     "VP9": {
         "format_selector": "vp9", 
         "common_name": "vp9",
-        "audio_codec": "opus"  # VP9 uses Opus for better quality
+        "audio_codec": "opus"
     },
     "AV1": {
         "format_selector": "av01",
         "common_name": "av1",
-        "audio_codec": "opus"  # AV1 uses Opus for better quality
+        "audio_codec": "opus"
     }
 }
 
-# Realistic resolution availability by codec (based on typical YouTube availability)
+# Realistic resolution availability by codec
 CODEC_RESOLUTION_MATRIX = {
     "H.264 (AVC)": {
         "1080p": {"height": 1080, "common": True},
@@ -110,7 +110,6 @@ CODEC_RESOLUTION_MATRIX = {
     }
 }
 
-# Update RESOLUTION_CODEC_MATRIX accordingly
 RESOLUTION_CODEC_MATRIX = {
     "2160p (4K)": ["VP9", "AV1"],
     "1440p (2K)": ["VP9", "AV1"],
@@ -128,6 +127,8 @@ DEFAULT_SETTINGS = {
     "theme": "Midnight Blue",
     "auto_check_updates": True,
     "last_update_check": "",
+    "last_ytdlp_update": "",
+    "use_speed_optimizations": True,  # New: enable speed optimizations by default
 }
 
 
@@ -171,13 +172,11 @@ def save_history(history: List[Dict]):
 # ---------- Icon Handling Function ----------
 def get_icon_path():
     """Get the path to the app icon, handling both development and built environments"""
-    # If we're running as a PyInstaller bundle
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
     else:
         base_path = os.path.dirname(os.path.abspath(__file__))
     
-    # Check for icon in several possible locations
     icon_paths = [
         os.path.join(base_path, "appicon.ico"),
         os.path.join(base_path, "resources", "appicon.ico"),
@@ -188,8 +187,150 @@ def get_icon_path():
         if os.path.exists(path):
             return path
     
-    # If no icon found, return None (will use default icon)
     return None
+
+# ---------- yt-dlp Auto-Update ----------
+class YtdlpUpdater(QThread):
+    """Thread for updating yt-dlp executable automatically"""
+    update_started = Signal()
+    update_progress = Signal(str)  # Progress message
+    update_finished = Signal(bool, str)  # (success, message)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.ytdlp_exe_path = self._get_ytdlp_path()
+    
+    def _get_ytdlp_path(self):
+        """Get the path where yt-dlp.exe should be located"""
+        if hasattr(sys, '_MEIPASS'):
+            # Running as PyInstaller bundle - yt-dlp.exe should be in the same directory as the .exe
+            return Path(sys.executable).parent / "yt-dlp.exe"
+        else:
+            # Running as script - look in script directory
+            return SCRIPT_DIR / "yt-dlp.exe"
+    
+    def run(self):
+        self.update_started.emit()
+        self.update_progress.emit("Checking yt-dlp version...")
+        
+        try:
+            # Check if yt-dlp.exe exists
+            if not self.ytdlp_exe_path.exists():
+                self.update_progress.emit("yt-dlp.exe not found, downloading...")
+                self._download_ytdlp()
+                return
+            
+            # Method 1: Try using yt-dlp.exe's built-in update (--update flag)
+            try:
+                self.update_progress.emit("Updating yt-dlp.exe using --update...")
+                
+                result = subprocess.run(
+                    [str(self.ytdlp_exe_path), "--update"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+                )
+                
+                output = result.stdout + result.stderr
+                
+                if "Updated" in output or "up to date" in output.lower() or "already" in output.lower():
+                    self.update_progress.emit("yt-dlp is up to date")
+                    self.update_finished.emit(True, "yt-dlp is already up to date")
+                    return
+                elif result.returncode == 0:
+                    self.update_progress.emit("yt-dlp updated successfully")
+                    self.update_finished.emit(True, "yt-dlp has been updated to the latest version")
+                    return
+                else:
+                    self.update_progress.emit("Self-update failed, trying manual download...")
+                    raise Exception("Self-update returned non-zero exit code")
+            
+            except Exception as self_update_error:
+                self.update_progress.emit(f"Self-update method failed: {str(self_update_error)}")
+            
+            # Method 2: Download latest yt-dlp.exe from GitHub
+            self._download_ytdlp()
+                
+        except Exception as e:
+            self.update_progress.emit(f"Update failed: {str(e)}")
+            self.update_finished.emit(False, f"Failed to update yt-dlp: {str(e)}")
+    
+    def _download_ytdlp(self):
+        """Download the latest yt-dlp.exe from GitHub"""
+        try:
+            self.update_progress.emit("Downloading latest yt-dlp.exe from GitHub...")
+            
+            # Get latest release info
+            response = requests.get(
+                "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
+                timeout=10
+            )
+            response.raise_for_status()
+            release_data = response.json()
+            
+            # Find the Windows executable
+            download_url = None
+            for asset in release_data.get("assets", []):
+                if asset["name"] == "yt-dlp.exe":
+                    download_url = asset["browser_download_url"]
+                    break
+            
+            if not download_url:
+                raise Exception("Could not find yt-dlp.exe in latest release")
+            
+            self.update_progress.emit(f"Downloading from {download_url}...")
+            
+            # Download the file
+            response = requests.get(download_url, stream=True, timeout=30)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            # Download to temporary file first
+            temp_path = self.ytdlp_exe_path.with_suffix('.tmp')
+            
+            with open(temp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            progress_pct = int((downloaded / total_size) * 100)
+                            self.update_progress.emit(f"Downloading: {progress_pct}%")
+            
+            # Replace old yt-dlp.exe with new one
+            if self.ytdlp_exe_path.exists():
+                backup_path = self.ytdlp_exe_path.with_suffix('.old')
+                if backup_path.exists():
+                    backup_path.unlink()
+                self.ytdlp_exe_path.rename(backup_path)
+            
+            temp_path.rename(self.ytdlp_exe_path)
+            
+            self.update_progress.emit("yt-dlp.exe updated successfully")
+            self.update_finished.emit(True, "yt-dlp has been updated to the latest version")
+            
+        except Exception as e:
+            self.update_progress.emit(f"Download failed: {str(e)}")
+            self.update_finished.emit(False, f"Failed to download yt-dlp: {str(e)}")
+
+
+def should_check_ytdlp_update(settings: Dict) -> bool:
+    """Check if it's time to update yt-dlp (every 24 hours)"""
+    last_check = settings.get("last_ytdlp_update", "")
+    if not last_check:
+        return True
+    
+    try:
+        last_dt = datetime.fromisoformat(last_check)
+        now = datetime.now()
+        hours_since = (now - last_dt).total_seconds() / 3600
+        return hours_since >= 24
+    except:
+        return True
+
 
 # ---------- Helper functions for update management ----------
 def get_current_executable_path():
@@ -230,7 +371,6 @@ start "" "{old_exe_path}"
 del /f /q "%~f0" 2>nul & exit /b 0
 '''
     
-    # Create batch file in temp directory
     batch_path = Path(tempfile.gettempdir()) / f"update_{app_name}_{os.getpid()}.bat"
     with open(batch_path, 'w') as f:
         f.write(batch_content)
@@ -243,12 +383,9 @@ def safe_replace_executable_delayed(old_path, new_path, app_name="yt2convert"):
     new_path = Path(new_path)
     
     try:
-        # Create the update batch script
         batch_script = create_update_batch_script(str(old_path), str(new_path), app_name)
         
-        # Start the batch script in a detached process
         if sys.platform.startswith("win"):
-            # Use DETACHED_PROCESS to ensure the batch runs independently
             subprocess.Popen(
                 [str(batch_script)], 
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_CONSOLE,
@@ -266,18 +403,15 @@ def safe_replace_executable_move_and_restart(old_path, new_path):
     backup_path = old_path.with_suffix('.old')
     
     try:
-        # Step 1: Rename the current executable to .old
         if old_path.exists():
             if backup_path.exists():
-                backup_path.unlink()  # Remove any existing .old file
+                backup_path.unlink()
             old_path.rename(backup_path)
         
-        # Step 2: Move new executable to the original location
         shutil.move(str(new_path), str(old_path))
         
         return True
     except Exception as e:
-        # Try to restore the original file if something went wrong
         if backup_path.exists() and not old_path.exists():
             try:
                 backup_path.rename(old_path)
@@ -287,13 +421,13 @@ def safe_replace_executable_move_and_restart(old_path, new_path):
 
 # ---------- Update Checker Thread ----------
 class UpdateChecker(QThread):
-    update_available = Signal(dict)  # {version, download_url, changelog}
+    update_available = Signal(dict)
     no_update = Signal()
-    check_failed = Signal(str)  # error message
+    check_failed = Signal(str)
     
     def __init__(self, silent_check=False, parent=None):
         super().__init__(parent)
-        self.silent_check = silent_check  # Don't show "no update" messages for automatic checks
+        self.silent_check = silent_check
     
     def run(self):
         try:
@@ -308,9 +442,7 @@ class UpdateChecker(QThread):
                     self.check_failed.emit("Invalid version format from GitHub")
                 return
             
-            # Compare versions using packaging.version for proper semantic versioning
             if version.parse(latest_version) > version.parse(APP_VERSION):
-                # Find Windows executable asset
                 download_url = None
                 for asset in release_data.get("assets", []):
                     if asset["name"].endswith(".exe") or asset["name"].endswith(".zip"):
@@ -326,7 +458,7 @@ class UpdateChecker(QThread):
                     })
                 else:
                     if not self.silent_check:
-                        self.check_failed.emit("No compatible download found")  # Fixed indentation here
+                        self.check_failed.emit("No compatible download found")
             else:
                 self.no_update.emit()
                 
@@ -339,9 +471,9 @@ class UpdateChecker(QThread):
 
 # ---------- Update Downloader Thread ----------
 class UpdateDownloader(QThread):
-    progress_changed = Signal(int)  # 0-100
-    download_finished = Signal(str)  # temp_file_path
-    download_failed = Signal(str)  # error message
+    progress_changed = Signal(int)
+    download_finished = Signal(str)
+    download_failed = Signal(str)
     
     def __init__(self, download_url, parent=None):
         super().__init__(parent)
@@ -355,7 +487,6 @@ class UpdateDownloader(QThread):
             
             total_size = int(response.headers.get('content-length', 0))
             
-            # Download to a temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix=".exe") as temp_file:
                 temp_path = temp_file.name
                 downloaded = 0
@@ -382,41 +513,46 @@ class UpdateDownloader(QThread):
 
 # ---------- Worker Thread for Download + Convert ----------
 class DownloadWorker(QThread):
-    progress_changed = Signal(float)  # 0.0-100.0
-    status_message = Signal(str, str)  # type, message (type: info/success/error)
-    finished_success = Signal(dict)    # info about file
+    progress_changed = Signal(float)
+    status_message = Signal(str, str)
+    finished_success = Signal(dict)
     log_line = Signal(str)
 
-    def __init__(self, url: str, format_choice: str, quality_choice: str, outdir: str, codec_choice: str = None, parent=None):
+    def __init__(self, url: str, format_choice: str, quality_choice: str, outdir: str, codec_choice: str = None, settings: Dict = None, parent=None):
         super().__init__(parent)
         self.url = url
         self.format_choice = format_choice
         self.quality_choice = quality_choice
         self.codec_choice = codec_choice
         self.outdir = str(Path(outdir).expanduser())
+        self.settings = settings or {}
         self._stop_requested = False
 
     def run(self):
-        # Use bundled ffmpeg (assumed to be in the same directory as the executable)
-        ffmpeg_path = "ffmpeg"
-        if not shutil.which(ffmpeg_path):
-            # Try to find ffmpeg in the same directory as the script/executable
-            if hasattr(sys, '_MEIPASS'):
-                # Running as PyInstaller bundle
-                ffmpeg_path = os.path.join(sys._MEIPASS, "ffmpeg.exe")
-            else:
-                # Running as script
-                ffmpeg_path = os.path.join(SCRIPT_DIR, "ffmpeg.exe")
-            
-            if not os.path.exists(ffmpeg_path):
-                self.status_message.emit("error", "FFmpeg not found. Make sure ffmpeg is bundled with the application.")
-                return
+        # Get paths for external executables
+        if hasattr(sys, '_MEIPASS'):
+            base_path = sys._MEIPASS
+            app_dir = Path(sys.executable).parent
+        else:
+            base_path = SCRIPT_DIR
+            app_dir = SCRIPT_DIR
+        
+        # FFmpeg path
+        ffmpeg_path = os.path.join(base_path, "ffmpeg.exe")
+        if not os.path.exists(ffmpeg_path):
+            self.status_message.emit("error", "FFmpeg not found. Make sure ffmpeg is bundled with the application.")
+            return
+        
+        # yt-dlp executable path (stored in app directory, not in _MEIPASS)
+        ytdlp_exe = app_dir / "yt-dlp.exe"
+        if not ytdlp_exe.exists():
+            self.status_message.emit("error", "yt-dlp.exe not found. Please wait for automatic download or check settings.")
+            return
 
         Path(self.outdir).mkdir(parents=True, exist_ok=True)
 
         tmp_template = os.path.join(self.outdir, "%(title).200s.%(ext)s")
         
-        # Common yt-dlp options
         ytdlp_opts = {
             "outtmpl": tmp_template,
             "restrictfilenames": False,
@@ -431,13 +567,10 @@ class DownloadWorker(QThread):
             "cookiefile": None,
         }
 
-        # Add format-specific options
         if self.format_choice in ["MP3", "WAV"]:
-            # Audio download
             ytdlp_opts["format"] = "bestaudio/best"
             ytdlp_opts["postprocessors"] = []
         else:
-            # Video download - use the improved format selector
             resolution = self.quality_choice
             codec = self.codec_choice or "Best Available"
             
@@ -446,16 +579,13 @@ class DownloadWorker(QThread):
             else:
                 format_parts = []
                 
-                # Add resolution constraint
                 if resolution != "Best Available" and resolution in RESOLUTION_CODEC_MATRIX:
-                    # Find the height from our codec matrix first
                     height = None
                     for codec_name, resolutions in CODEC_RESOLUTION_MATRIX.items():
                         if resolution in resolutions:
                             height = resolutions[resolution]["height"]
                             break
                     
-                    # Fallback - extract height from resolution string
                     if height is None:
                         import re
                         height_match = re.search(r'(\d+)p', resolution)
@@ -463,20 +593,16 @@ class DownloadWorker(QThread):
                     
                     format_parts.append(f"height<={height}")
                 
-                # Add codec constraint  
                 if codec != "Best Available" and codec in VIDEO_CODEC_FORMATS:
                     codec_selector = VIDEO_CODEC_FORMATS[codec]["format_selector"]
                     format_parts.append(f"vcodec^={codec_selector}")
                 
-                # Build the format string with fallback
                 if format_parts:
                     constraints = "[" + "][".join(format_parts) + "]"
                     
-                    # For H.264, prioritize formats with AAC audio but allow fallback to any audio
                     if codec == "H.264 (AVC)":
                         format_string = f"bestvideo{constraints}+bestaudio[acodec^=mp4a]/best{constraints}/bestvideo+bestaudio/best"
                     else:
-                        # For other codecs, use the best available audio
                         format_string = f"bestvideo{constraints}+bestaudio/best{constraints}/bestvideo+bestaudio/best"
                 else:
                     format_string = "bestvideo+bestaudio/best"
@@ -489,42 +615,169 @@ class DownloadWorker(QThread):
         self.status_message.emit("info", "Starting download...")
 
         try:
-            with ytdlp.YoutubeDL(ytdlp_opts) as ydl:
-                info = ydl.extract_info(self.url, download=True)
+            # Use yt-dlp executable instead of Python package
+            ytdlp_cmd = [str(ytdlp_exe)]
+            
+            # Add common options
+            ytdlp_cmd.extend([
+                "-o", tmp_template,
+                "--no-warnings",
+                "--no-playlist",
+                "--progress",
+                "--newline"
+            ])
+            
+            # Apply speed optimizations if enabled
+            if self.settings.get("use_speed_optimizations", True):
+                # Speed optimization options
+                ytdlp_cmd.extend([
+                    "--concurrent-fragments", "4",  # Download multiple fragments simultaneously
+                    "--extractor-retries", "3",
+                    "--fragment-retries", "3",
+                    "--file-access-retries", "3",
+                    "--throttled-rate", "100K",  # Only consider it throttled below 100KB/s
+                ])
+                
+                # Add user-agent to mimic real browser
+                user_agents = [
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ]
+                import random
+                ytdlp_cmd.extend(["--user-agent", random.choice(user_agents)])
+                
+                # Note: We skip browser cookies due to DPAPI decryption issues on Windows
+                # The other optimizations (concurrent downloads, user-agent) are enough
+            
+            # Add format-specific options
+            if self.format_choice in ["MP3", "WAV"]:
+                ytdlp_cmd.extend(["-f", "bestaudio/best"])
+            else:
+                # Video download format selection
+                resolution = self.quality_choice
+                codec = self.codec_choice or "Best Available"
+                
+                if resolution == "Best Available" and codec == "Best Available":
+                    ytdlp_cmd.extend(["-f", "bestvideo+bestaudio/best"])
+                else:
+                    format_parts = []
+                    
+                    if resolution != "Best Available" and resolution in RESOLUTION_CODEC_MATRIX:
+                        height = None
+                        for codec_name, resolutions in CODEC_RESOLUTION_MATRIX.items():
+                            if resolution in resolutions:
+                                height = resolutions[resolution]["height"]
+                                break
+                        
+                        if height is None:
+                            import re
+                            height_match = re.search(r'(\d+)p', resolution)
+                            height = int(height_match.group(1)) if height_match else 720
+                        
+                        format_parts.append(f"height<={height}")
+                    
+                    if codec != "Best Available" and codec in VIDEO_CODEC_FORMATS:
+                        codec_selector = VIDEO_CODEC_FORMATS[codec]["format_selector"]
+                        format_parts.append(f"vcodec^={codec_selector}")
+                    
+                    if format_parts:
+                        constraints = "[" + "][".join(format_parts) + "]"
+                        
+                        if codec == "H.264 (AVC)":
+                            format_string = f"bestvideo{constraints}+bestaudio[acodec^=mp4a]/best{constraints}/bestvideo+bestaudio/best"
+                        else:
+                            format_string = f"bestvideo{constraints}+bestaudio/best{constraints}/bestvideo+bestaudio/best"
+                    else:
+                        format_string = "bestvideo+bestaudio/best"
+                    
+                    ytdlp_cmd.extend(["-f", format_string])
+                
+                ytdlp_cmd.extend(["--merge-output-format", "mp4"])
+            
+            ytdlp_cmd.append(self.url)
+            
+            # Run yt-dlp executable
+            proc = subprocess.Popen(
+                ytdlp_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+            )
+            
+            downloaded_file = None
+            while True:
+                if self._stop_requested:
+                    proc.terminate()
+                    self.status_message.emit("error", "Operation cancelled by user.")
+                    return
+                    
+                line = proc.stdout.readline()
+                if line == "" and proc.poll() is not None:
+                    break
+                    
+                if line:
+                    line = line.strip()
+                    self.log_line.emit(line)
+                    
+                    # Parse progress from yt-dlp output
+                    if "[download]" in line and "%" in line:
+                        try:
+                            import re
+                            match = re.search(r'(\d+\.?\d*)%', line)
+                            if match:
+                                pct = float(match.group(1))
+                                self.progress_changed.emit(min(80.0, pct * 0.8))
+                        except:
+                            pass
+                    
+                    # Capture the destination filename
+                    if "[download] Destination:" in line or "Merging formats into" in line:
+                        parts = line.split(":", 1)
+                        if len(parts) > 1:
+                            downloaded_file = parts[1].strip().strip('"')
+            
+            ret = proc.wait()
+            if ret != 0:
+                self.status_message.emit("error", f"yt-dlp failed with exit code {ret}.")
+                return
+            
+            # Find the downloaded file
+            if not downloaded_file or not os.path.exists(downloaded_file):
+                # Try to find the most recent file in output directory
+                output_files = list(Path(self.outdir).glob("*"))
+                if output_files:
+                    downloaded_file = str(max(output_files, key=lambda p: p.stat().st_mtime))
+                else:
+                    self.status_message.emit("error", "Could not locate downloaded file.")
+                    return
+            
+            downloaded_path = downloaded_file
+            
         except Exception as e:
             self.status_message.emit("error", f"Download failed: {e}")
             return
 
-        if not info:
-            self.status_message.emit("error", "Failed to extract video info.")
-            return
-
-        try:
-            downloaded_path = ydl.prepare_filename(info)
-        except Exception:
-            ext = info.get("ext", "webm")
-            title = info.get("title", f"yt_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-            downloaded_path = os.path.join(self.outdir, f"{title}.{ext}")
-
-        base_title = info.get("title", f"yt_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        # Get video title for naming
+        base_title = Path(downloaded_path).stem
+        if base_title.startswith("yt_"):
+            base_title = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         safe_basename = "".join(c for c in base_title if c.isalnum() or c in " .-_()").strip()
         
-        # Set output extension based on format
         if self.format_choice in ["MP3", "WAV"]:
             out_ext = self.format_choice.lower()
         else:
-            out_ext = "mp4"  # For video formats
+            out_ext = "mp4"
             
         out_name = f"{safe_basename}.{out_ext}"
         out_path = os.path.join(self.outdir, out_name)
 
         self.log_line.emit(f"Downloaded to: {downloaded_path}")
         
-        # Handle audio conversion
         if self.format_choice in ["MP3", "WAV"]:
             self.status_message.emit("info", "Converting audio...")
             
-            # Get format settings
             format_settings = AUDIO_FORMATS[self.format_choice.upper()][self.quality_choice]
             
             if out_ext == "mp3":
@@ -535,7 +788,7 @@ class DownloadWorker(QThread):
                     "-b:a", format_settings["bitrate"],
                     out_path
                 ]
-            else:  # wav
+            else:
                 ff_args = [
                     ffmpeg_path, "-y", "-i", downloaded_path,
                     "-vn", "-map", "0:a",
@@ -546,12 +799,12 @@ class DownloadWorker(QThread):
 
             try:
                 proc = subprocess.Popen(
-                ff_args,
-                stderr=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+                    ff_args,
+                    stderr=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
                 while True:
                     if self._stop_requested:
                         proc.terminate()
@@ -574,18 +827,13 @@ class DownloadWorker(QThread):
                 try:
                     audio = MP3(out_path, ID3=EasyID3)
                     tags = {}
-                    if info.get("title"):
-                        tags["title"] = info.get("title")
-                    if info.get("uploader"):
-                        tags["artist"] = info.get("uploader")
-                    if info.get("upload_date"):
-                        tags["date"] = info.get("upload_date")[:4]
+                    tags["title"] = base_title
+                    # Can't get uploader info from executable output easily
                     audio.update(tags)
                     audio.save()
                 except Exception as e:
                     self.log_line.emit(f"Tagging warning: {e}")
 
-            # Clean up intermediate file for audio conversions
             try:
                 dp = Path(downloaded_path)
                 op = Path(out_path)
@@ -598,14 +846,13 @@ class DownloadWorker(QThread):
             except Exception:
                 pass
         else:
-            # For video downloads, just rename if needed
             if downloaded_path != out_path:
                 try:
                     shutil.move(downloaded_path, out_path)
                     self.log_line.emit(f"Renamed video file to: {out_path}")
                 except Exception as e:
                     self.log_line.emit(f"Could not rename video file: {e}")
-                    out_path = downloaded_path  # Use the original path
+                    out_path = downloaded_path
 
         self.progress_changed.emit(100.0)
         self.status_message.emit("success", f"Saved: {out_path}")
@@ -619,18 +866,9 @@ class DownloadWorker(QThread):
         })
 
     def _progress_hook(self, d):
-        if d.get("status") == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            downloaded = d.get("downloaded_bytes")
-            if total and downloaded:
-                pct = (downloaded / total) * 80.0
-                self.progress_changed.emit(float(max(0.0, min(80.0, pct))))
-            else:
-                self.progress_changed.emit(10.0)
-            self.log_line.emit(f"Downloading: {d.get('_percent_str','')} {d.get('_eta_str','')}")
-        elif d.get("status") == "finished":
-            self.progress_changed.emit(85.0)
-            self.log_line.emit("Download finished, ready to convert." if self.format_choice in ["MP3", "WAV"] else "Download finished.")
+        # This method is no longer used since we're using yt-dlp executable
+        # Keeping it for backward compatibility
+        pass
 
     def request_stop(self):
         self._stop_requested = True
@@ -649,23 +887,19 @@ class UpdateDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         
-        # Header
-        header = QLabel(f"🎉 New version available: {self.update_info['version']}")
+        header = QLabel(f"New version available: {self.update_info['version']}")
         header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2e7d32; margin-bottom: 10px;")
         layout.addWidget(header)
         
-        # Release name
         if self.update_info.get('release_name'):
             release_label = QLabel(self.update_info['release_name'])
             release_label.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 10px;")
             layout.addWidget(release_label)
         
-        # Current version
         current_label = QLabel(f"Current version: {APP_VERSION}")
         current_label.setStyleSheet("color: #666; margin-bottom: 15px;")
         layout.addWidget(current_label)
         
-        # Changelog
         changelog_label = QLabel("What's New:")
         changelog_label.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
         layout.addWidget(changelog_label)
@@ -676,17 +910,14 @@ class UpdateDialog(QDialog):
         changelog.setMaximumHeight(150)
         layout.addWidget(changelog)
         
-        # Progress bar (initially hidden)
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
         
-        # Status label
         self.status_label = QLabel("")
         self.status_label.setVisible(False)
         layout.addWidget(self.status_label)
         
-        # Buttons
         button_layout = QHBoxLayout()
         
         self.download_btn = QPushButton("Download & Install")
@@ -745,11 +976,9 @@ class UpdateDialog(QDialog):
         try:
             current_exe = get_current_executable_path()
             
-            # Try the delayed batch script method first (most reliable)
             try:
                 safe_replace_executable_delayed(current_exe, temp_path, APP_NAME)
                 
-                # Show success message
                 msg = QMessageBox(self)
                 msg.setWindowTitle("Update Complete")
                 msg.setIcon(QMessageBox.Information)
@@ -763,18 +992,12 @@ class UpdateDialog(QDialog):
                 msg.setDefaultButton(QMessageBox.Ok)
                 
                 if msg.exec() == QMessageBox.Ok:
-                    # Close the application to trigger the update
                     QApplication.instance().quit()
-                else:
-                    # User chose to continue using the app, update will happen on next close
-                    pass
                 
             except Exception as batch_error:
-                # Fallback to the rename method
                 try:
                     safe_replace_executable_move_and_restart(current_exe, temp_path)
                     
-                    # Show success message for rename method
                     msg = QMessageBox(self)
                     msg.setWindowTitle("Update Complete")
                     msg.setIcon(QMessageBox.Information)
@@ -786,7 +1009,6 @@ class UpdateDialog(QDialog):
                     msg.setStandardButtons(QMessageBox.Ok)
                     
                     if msg.exec() == QMessageBox.Ok:
-                        # Restart the application
                         try:
                             subprocess.Popen([current_exe], cwd=Path(current_exe).parent)
                             QApplication.instance().quit()
@@ -799,7 +1021,6 @@ class UpdateDialog(QDialog):
                             error_msg.exec()
                             
                 except Exception as rename_error:
-                    # Both methods failed
                     error_msg = QMessageBox(self)
                     error_msg.setIcon(QMessageBox.Critical)
                     error_msg.setWindowTitle("Installation Error")
@@ -833,12 +1054,10 @@ class ModernMainWindow(QWidget):
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setMinimumSize(920, 600)
         
-        # Set window icon - moved here to avoid QPixmap error
         icon_path = get_icon_path()
         if icon_path and os.path.exists(icon_path):
             app_icon = QIcon(icon_path)
             self.setWindowIcon(app_icon)
-            # Also set application icon for taskbar
             QApplication.instance().setWindowIcon(app_icon)
 
         self.settings = load_settings()
@@ -847,16 +1066,63 @@ class ModernMainWindow(QWidget):
         self.history: List[Dict] = load_history()
         self.update_checker: Optional[UpdateChecker] = None
         self.has_update_available = False
+        self.ytdlp_updater: Optional[YtdlpUpdater] = None
 
         self._build_ui()
         self._apply_theme()
         self._load_history_list()
         
-        # Check for updates on startup if enabled
+        # Check for app updates on startup if enabled
         if self.settings.get("auto_check_updates", True):
-            QTimer.singleShot(2000, self._check_for_updates_silent)  # Check after 2 seconds
+            QTimer.singleShot(2000, self._check_for_updates_silent)
+        
+        # Always check for yt-dlp updates on startup (automatic, silent)
+        # This will download if missing, or update if 24+ hours have passed
+        QTimer.singleShot(500, self._check_and_update_ytdlp)
 
-    # ---------- Download control ----------
+    def _check_and_update_ytdlp(self):
+        """Check and update yt-dlp automatically - downloads if missing or updates if 24hrs passed"""
+        # Get yt-dlp.exe path
+        if hasattr(sys, '_MEIPASS'):
+            app_dir = Path(sys.executable).parent
+        else:
+            app_dir = SCRIPT_DIR
+        
+        ytdlp_exe = app_dir / "yt-dlp.exe"
+        
+        # Always update if yt-dlp.exe is missing
+        if not ytdlp_exe.exists():
+            self._append_log("yt-dlp.exe not found - downloading now...")
+            self._force_ytdlp_update()
+            return
+        
+        # Otherwise, check if 24 hours have passed
+        if should_check_ytdlp_update(self.settings):
+            self._append_log("Checking for yt-dlp updates...")
+            self._force_ytdlp_update()
+    
+    def _force_ytdlp_update(self):
+        """Force an immediate yt-dlp update"""
+        self.ytdlp_updater = YtdlpUpdater()
+        self.ytdlp_updater.update_progress.connect(self._on_ytdlp_update_progress)
+        self.ytdlp_updater.update_finished.connect(self._on_ytdlp_update_finished)
+        self.ytdlp_updater.start()
+    
+    def _on_ytdlp_update_progress(self, message: str):
+        """Handle yt-dlp update progress messages"""
+        self._append_log(f"yt-dlp: {message}")
+    
+    def _on_ytdlp_update_finished(self, success: bool, message: str):
+        """Handle yt-dlp update completion"""
+        if success:
+            self._append_log(f"yt-dlp: {message}")
+            self.settings["last_ytdlp_update"] = datetime.now().isoformat()
+            save_settings(self.settings)
+        else:
+            self._append_log(f"yt-dlp update warning: {message}")
+        
+        self.ytdlp_updater = None
+
     def start_download(self):
         url = self.url_input.text().strip()
         if not url:
@@ -870,7 +1136,6 @@ class ModernMainWindow(QWidget):
             self._set_status("error", "Please select format and quality.")
             return
 
-        # For MP4, get the codec choice
         codec_choice = None
         if format_choice == "MP4":
             codec_choice = self.codec_dropdown.currentText()
@@ -882,7 +1147,7 @@ class ModernMainWindow(QWidget):
         self.progress_bar.setValue(0)
         self._set_status("info", "Queued...")
 
-        self.worker = DownloadWorker(url, format_choice, quality_choice, outdir, codec_choice)
+        self.worker = DownloadWorker(url, format_choice, quality_choice, outdir, codec_choice, self.settings)
         self.worker.progress_changed.connect(self.progress_bar.setValue)
         self.worker.status_message.connect(self._set_status)
         self.worker.log_line.connect(self._append_log)
@@ -895,7 +1160,6 @@ class ModernMainWindow(QWidget):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        # Main card
         card = QFrame()
         card.setObjectName("card")
         card.setMinimumHeight(540)
@@ -903,24 +1167,21 @@ class ModernMainWindow(QWidget):
         card_layout.setContentsMargins(16, 16, 16, 16)
         card_layout.setSpacing(12)
 
-        # Header
         header = QHBoxLayout()
         title = QLabel(APP_NAME)
         title.setObjectName("app_title")
         title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        subtitle = QLabel("🎶 Audio/Video download & convert — yt-dlp + ffmpeg")
+        subtitle = QLabel("Audio/Video download & convert — yt-dlp + ffmpeg")
         subtitle.setObjectName("subtitle")
         header.addWidget(title)
         header.addWidget(subtitle, 0, Qt.AlignRight)
         card_layout.addLayout(header)
 
-        # Controls row
         controls = QHBoxLayout()
         controls.setSpacing(10)
 
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("Paste YouTube URL or share link...")
-        # Moved the connection to after the method is defined
 
         self.format_dropdown = QComboBox()
         self.format_dropdown.addItems(["MP3", "WAV", "MP4"])
@@ -933,16 +1194,14 @@ class ModernMainWindow(QWidget):
         self.codec_dropdown = QComboBox()
         self.codec_dropdown.setFixedWidth(130)
         self.codec_dropdown.addItems(["Auto (Best Available)"] + list(VIDEO_CODEC_FORMATS.keys()))
-        self.codec_dropdown.setVisible(False)  # Hidden by default
+        self.codec_dropdown.setVisible(False)
 
-        # Add info icon (only visible when MP4 is selected)
         self.info_icon = QLabel()
         self.info_icon.setFixedSize(16, 16)
         self.info_icon.setVisible(False)
-        self.info_icon.setToolTip("")  # Will be set dynamically
+        self.info_icon.setToolTip("")
         self.info_icon.setCursor(Qt.PointingHandCursor)
         
-        # Set a stylish info icon using unicode character
         self.info_icon.setText("ⓘ")
         self.info_icon.setStyleSheet("""
             QLabel {
@@ -957,29 +1216,25 @@ class ModernMainWindow(QWidget):
             }
         """)
         
-        # Create a custom tooltip with styling
         self.info_icon.mousePressEvent = self._show_codec_info
 
         self.start_button = QPushButton("Download")
         self.start_button.setFixedWidth(140)
-        # Moved the connection to after the method is defined
 
         controls.addWidget(self.url_input, 1)
         controls.addWidget(self.format_dropdown)
         controls.addWidget(self.quality_dropdown)
         controls.addWidget(self.codec_dropdown)
-        controls.addWidget(self.info_icon)  # Add the info icon
+        controls.addWidget(self.info_icon)
         controls.addWidget(self.start_button)
 
         card_layout.addLayout(controls)
 
-        # Initialize quality options
         self._update_format_options()
 
         self.codec_dropdown.currentTextChanged.connect(self._on_codec_changed)
         self.quality_dropdown.currentTextChanged.connect(self._on_quality_changed)
 
-        # Progress area
         prog_row = QHBoxLayout()
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -996,7 +1251,6 @@ class ModernMainWindow(QWidget):
         prog_row.addWidget(self.cancel_button)
         card_layout.addLayout(prog_row)
 
-        # Split: left = history, right = status + log + settings
         split_row = QHBoxLayout()
         left = QVBoxLayout()
         left_label = QLabel("Conversion history")
@@ -1043,21 +1297,18 @@ class ModernMainWindow(QWidget):
 
         card_layout.addLayout(split_row)
 
-        help_label = QLabel("💡 Tip: Customize the output folder and theme in Settings.")
+        help_label = QLabel("Tip: Customize the output folder and theme in Settings.")
         help_label.setObjectName("help")
         card_layout.addWidget(help_label)
 
         root.addWidget(card)
         self.setLayout(root)
         
-        # Connect signals after all UI elements are created and methods are defined
         self.url_input.returnPressed.connect(self.start_download)
         self.start_button.clicked.connect(self.start_download)
 
     def _show_codec_info(self, event):
         """Show a custom dialog with codec information"""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
-        
         dlg = QDialog(self)
         dlg.setWindowTitle("Codec Information")
         dlg.setMinimumWidth(400)
@@ -1065,7 +1316,6 @@ class ModernMainWindow(QWidget):
         
         layout = QVBoxLayout(dlg)
         
-        # Style the dialog with rounded corners
         dlg.setStyleSheet("""
             QDialog {
                 background: rgba(25, 35, 45, 0.95);
@@ -1079,7 +1329,6 @@ class ModernMainWindow(QWidget):
             }
         """)
         
-        # Updated info text with correct audio codec information
         info_text = """
         <h3>Video Codec Information</h3>
         <p><b>H.264 (AVC):</b> Best compatibility, average quality. Max quality is 1080p. Prioritizes AAC audio for compatibility.</p>
@@ -1093,7 +1342,6 @@ class ModernMainWindow(QWidget):
         label.setTextFormat(Qt.RichText)
         layout.addWidget(label)
         
-        # Position the dialog near the info icon
         icon_pos = self.info_icon.mapToGlobal(self.info_icon.rect().topLeft())
         dlg.move(icon_pos.x() - 350, icon_pos.y() + 20)
         
@@ -1103,54 +1351,44 @@ class ModernMainWindow(QWidget):
         """Update quality and codec dropdowns based on selected format"""
         current_format = self.format_dropdown.currentText()
         
-        # Store current selections to preserve them if possible
         current_quality = self.quality_dropdown.currentText()
         current_codec = self.codec_dropdown.currentText()
         
         self.quality_dropdown.clear()
         
-        # Show/hide info icon based on format
         self.info_icon.setVisible(current_format == "MP4")
         
         if current_format in AUDIO_FORMATS:
-            # Audio format - show quality options, hide codec dropdown
             qualities = list(AUDIO_FORMATS[current_format].keys())
             self.quality_dropdown.addItems(qualities)
-            # Set default to highest quality (first item)
             if current_quality in qualities:
                 self.quality_dropdown.setCurrentText(current_quality)
             else:
                 self.quality_dropdown.setCurrentIndex(0)
             self.codec_dropdown.setVisible(False)
         elif current_format == "MP4":
-            # Video format - show resolution options and codec dropdown
             self.codec_dropdown.setVisible(True)
             
-            # If codec is already selected, filter resolutions by codec
             if current_codec and current_codec in list(VIDEO_CODEC_FORMATS.keys()) + ["Auto (Best Available)"]:
                 available_resolutions = self._get_available_resolutions_for_codec(current_codec)
             else:
-                # Default: show all resolutions
                 available_resolutions = ["Best Available"] + list(RESOLUTION_CODEC_MATRIX.keys())
             
             self.quality_dropdown.addItems(available_resolutions)
             
-            # Try to preserve the previous quality selection
             if current_quality in available_resolutions:
                 self.quality_dropdown.setCurrentText(current_quality)
             else:
-                self.quality_dropdown.setCurrentIndex(0)  # Default to "Best Available"
+                self.quality_dropdown.setCurrentIndex(0)
 
     def _get_available_resolutions_for_codec(self, codec):
         """Get available resolutions for a specific codec"""
         if codec == "Auto (Best Available)":
-            # Return all resolutions, let yt-dlp decide
             return ["Best Available"] + list(RESOLUTION_CODEC_MATRIX.keys())
         
         if codec in CODEC_RESOLUTION_MATRIX:
-            available = ["Best Available"]  # Always include best available option
+            available = ["Best Available"]
             resolutions = CODEC_RESOLUTION_MATRIX[codec]
-            # Add resolutions, prioritizing common ones
             common_res = [res for res, info in resolutions.items() if info.get("common", False)]
             uncommon_res = [res for res, info in resolutions.items() if not info.get("common", False)]
             available.extend(common_res + uncommon_res)
@@ -1163,7 +1401,7 @@ class ModernMainWindow(QWidget):
             return ["Auto (Best Available)"] + list(VIDEO_CODEC_FORMATS.keys())
         
         if resolution in RESOLUTION_CODEC_MATRIX:
-            available = ["Auto (Best Available)"]  # Always include auto option
+            available = ["Auto (Best Available)"]
             available.extend(RESOLUTION_CODEC_MATRIX[resolution])
             return available
         return ["Auto (Best Available)"]
@@ -1176,15 +1414,12 @@ class ModernMainWindow(QWidget):
         current_codec = self.codec_dropdown.currentText()
         current_quality = self.quality_dropdown.currentText()
         
-        # Get available resolutions for this codec
         available_resolutions = self._get_available_resolutions_for_codec(current_codec)
         
-        # Update quality dropdown
-        self.quality_dropdown.blockSignals(True)  # Prevent recursive signals
+        self.quality_dropdown.blockSignals(True)
         self.quality_dropdown.clear()
         self.quality_dropdown.addItems(available_resolutions)
         
-        # Try to preserve selection, otherwise default to "Best Available"
         if current_quality in available_resolutions:
             self.quality_dropdown.setCurrentText(current_quality)
         else:
@@ -1200,15 +1435,12 @@ class ModernMainWindow(QWidget):
         current_quality = self.quality_dropdown.currentText()
         current_codec = self.codec_dropdown.currentText()
         
-        # Get available codecs for this resolution
         available_codecs = self._get_available_codecs_for_resolution(current_quality)
         
-        # Update codec dropdown
-        self.codec_dropdown.blockSignals(True)  # Prevent recursive signals
+        self.codec_dropdown.blockSignals(True)
         self.codec_dropdown.clear()
         self.codec_dropdown.addItems(available_codecs)
         
-        # Try to preserve selection, otherwise default to "Auto"
         if current_codec in available_codecs:
             self.codec_dropdown.setCurrentText(current_codec)
         else:
@@ -1253,7 +1485,6 @@ class ModernMainWindow(QWidget):
                 QTextEdit { background: rgba(0,0,0,0.18); }
                 QListWidget { background: rgba(0,0,0,0.12); }
                 
-                /* Tooltip styling */
                 QToolTip {
                     background-color: rgba(25, 35, 45, 0.95);
                     color: #e6eef8;
@@ -1361,7 +1592,6 @@ class ModernMainWindow(QWidget):
         self.status_label.setText(f"<span style='color:{color};font-weight:700'>{typ.upper()}</span>: {message}")
         QTimer.singleShot(6000, lambda: self.status_label.setText(""))
 
-    # ---------- Update Checking ----------
     def _check_for_updates_silent(self):
         """Check for updates without showing messages if no update is available"""
         self.silent_checker = UpdateChecker(silent_check=True)
@@ -1384,7 +1614,6 @@ class ModernMainWindow(QWidget):
         self.has_update_available = True
         self._update_window_title()
         
-        # Show update dialog
         update_dialog = UpdateDialog(update_info, self)
         update_dialog.exec()
 
@@ -1396,14 +1625,12 @@ class ModernMainWindow(QWidget):
         """Handle update check failure"""
         self._set_status("error", f"Update check failed: {error_message}")
 
-    # ---------- Settings dialog (updated with update options) ----------
     def open_settings_dialog(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("Settings")
-        dlg.setMinimumSize(480, 300)  # Increased height for update options
+        dlg.setMinimumSize(480, 380)
         layout = QFormLayout(dlg)
 
-        # Output folder
         folder_input = QLineEdit(self.settings.get("download_folder", DEFAULT_SETTINGS["download_folder"]))
         browse_btn = QPushButton("Browse")
         h = QHBoxLayout()
@@ -1411,29 +1638,34 @@ class ModernMainWindow(QWidget):
         h.addWidget(browse_btn)
         layout.addRow("Output folder:", h)
 
-        # Theme selection
         theme_combo = QComboBox()
         theme_combo.addItems(["Midnight Blue", "Pure Light", "Forest"])
         theme_combo.setCurrentText(self.settings.get("theme", "Midnight Blue"))
         layout.addRow("Theme:", theme_combo)
 
-        # Update settings
         update_layout = QVBoxLayout()
         
-        # Version info
         version_label = QLabel(f"Current version: {APP_VERSION}")
         update_layout.addWidget(version_label)
         
-        # Auto-update checkbox
         auto_update_check = QCheckBox("Check for updates automatically")
         auto_update_check.setChecked(self.settings.get("auto_check_updates", True))
         update_layout.addWidget(auto_update_check)
         
-        # Check for updates button
         check_update_btn = QPushButton("Check for Updates")
         update_layout.addWidget(check_update_btn)
         
         layout.addRow("Updates:", update_layout)
+        
+        ytdlp_layout = QVBoxLayout()
+        ytdlp_info = QLabel("yt-dlp updates automatically every 24 hours")
+        ytdlp_info.setStyleSheet("color: #666; font-size: 11px;")
+        ytdlp_layout.addWidget(ytdlp_info)
+        
+        force_ytdlp_btn = QPushButton("Force Update yt-dlp Now")
+        ytdlp_layout.addWidget(force_ytdlp_btn)
+        
+        layout.addRow("yt-dlp:", ytdlp_layout)
 
         def browse_folder():
             d = QFileDialog.getExistingDirectory(self, "Select output folder", folder_input.text())
@@ -1448,7 +1680,6 @@ class ModernMainWindow(QWidget):
             check_update_btn.setText("Checking...")
             QApplication.processEvents()
             
-            # Store the checker as an attribute of the dialog to prevent premature destruction
             dlg.checker = UpdateChecker(silent_check=False)
             
             def on_update_available(info):
@@ -1459,7 +1690,6 @@ class ModernMainWindow(QWidget):
                 check_update_btn.setText("You're up to date!")
                 dlg.setEnabled(True)
                 self._on_no_update()
-                # Revert button text after 5 seconds
                 QTimer.singleShot(5000, lambda: check_update_btn.setText(original_text))
                 
             def on_check_failed(e):
@@ -1470,10 +1700,55 @@ class ModernMainWindow(QWidget):
             dlg.checker.update_available.connect(on_update_available)
             dlg.checker.no_update.connect(on_no_update)
             dlg.checker.check_failed.connect(on_check_failed)
-            dlg.checker.finished.connect(lambda: setattr(dlg, 'checker', None))  # Clean up reference when done
+            dlg.checker.finished.connect(lambda: setattr(dlg, 'checker', None))
             dlg.checker.start()
 
         check_update_btn.clicked.connect(check_updates)
+        
+        def force_ytdlp_update():
+            dlg.setEnabled(False)
+            original_text = force_ytdlp_btn.text()
+            force_ytdlp_btn.setText("Updating yt-dlp...")
+            QApplication.processEvents()
+            
+            self._append_log("Manual yt-dlp update requested...")
+            
+            dlg.ytdlp_updater = YtdlpUpdater()
+            
+            def on_ytdlp_progress(msg):
+                self._append_log(f"yt-dlp: {msg}")
+            
+            def on_ytdlp_finished(success, msg):
+                force_ytdlp_btn.setText(original_text)
+                dlg.setEnabled(True)
+                if success:
+                    self._append_log(f"yt-dlp: {msg}")
+                    self.settings["last_ytdlp_update"] = datetime.now().isoformat()
+                    save_settings(self.settings)
+                    QMessageBox.information(dlg, "Success", msg)
+                else:
+                    self._append_log(f"yt-dlp update warning: {msg}")
+                    QMessageBox.warning(dlg, "Warning", msg)
+            
+            dlg.ytdlp_updater.update_progress.connect(on_ytdlp_progress)
+            dlg.ytdlp_updater.update_finished.connect(on_ytdlp_finished)
+            dlg.ytdlp_updater.start()
+        
+        force_ytdlp_btn.clicked.connect(force_ytdlp_update)
+        
+        # Speed optimization settings
+        speed_layout = QVBoxLayout()
+        speed_check = QCheckBox("Enable download speed optimizations (recommended)")
+        speed_check.setChecked(self.settings.get("use_speed_optimizations", True))
+        speed_check.setToolTip("Uses browser cookies, concurrent downloads, and smart throttling bypass")
+        speed_layout.addWidget(speed_check)
+        
+        speed_info = QLabel("Helps bypass YouTube throttling by using:\n• Browser cookies for authentication\n• Concurrent fragment downloads\n• Random user-agents")
+        speed_info.setStyleSheet("color: #666; font-size: 11px;")
+        speed_info.setWordWrap(True)
+        speed_layout.addWidget(speed_info)
+        
+        layout.addRow("Speed:", speed_layout)
 
         btn_row = QHBoxLayout()
         save_btn = QPushButton("Save")
@@ -1487,9 +1762,9 @@ class ModernMainWindow(QWidget):
             self.settings["download_folder"] = folder_input.text()
             self.settings["theme"] = theme_combo.currentText()
             self.settings["auto_check_updates"] = auto_update_check.isChecked()
+            self.settings["use_speed_optimizations"] = speed_check.isChecked()
             save_settings(self.settings)
             
-            # Apply theme immediately if changed
             if old_theme != self.settings["theme"]:
                 self._apply_theme()
             
@@ -1497,17 +1772,18 @@ class ModernMainWindow(QWidget):
             dlg.accept()
 
         def do_cancel():
-            # Clean up any running thread
             if hasattr(dlg, 'checker') and dlg.checker and dlg.checker.isRunning():
                 dlg.checker.quit()
-                dlg.checker.wait(1000)  # Wait up to 1 second for thread to finish
+                dlg.checker.wait(1000)
+            if hasattr(dlg, 'ytdlp_updater') and dlg.ytdlp_updater and dlg.ytdlp_updater.isRunning():
+                dlg.ytdlp_updater.quit()
+                dlg.ytdlp_updater.wait(1000)
             dlg.reject()
 
         save_btn.clicked.connect(do_save)
         cancel_btn.clicked.connect(do_cancel)
         dlg.exec()
 
-    # ---------- History list ----------
     def _load_history_list(self):
         self.history = load_history()
         self.dl_list.clear()
@@ -1638,8 +1914,6 @@ class ModernMainWindow(QWidget):
         if self.worker:
             self.worker.request_stop()
             self._set_status("info", "Cancel requested...")
-
-# ---------- App entry ----------
 
 def main():
     app = QApplication(sys.argv)

@@ -52,5 +52,5 @@ version_info.txt
 build/
 dist/
 
-ffmpeg.exe
+*.exe
 *.ico
