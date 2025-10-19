@@ -29,7 +29,7 @@ from mutagen.easyid3 import EasyID3
 from mutagen.mp3 import MP3
 
 APP_NAME = "yt2convert"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "HossEz/yt2convert" 
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
